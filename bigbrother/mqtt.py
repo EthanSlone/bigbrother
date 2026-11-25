@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 
 import paho.mqtt.client as mqtt
 
@@ -21,7 +21,24 @@ class Publisher:
         self._client.will_set(self.available_topic, "offline", qos=1, retain=True)
         self._client.on_connect = self._on_connect
         self._client.reconnect_delay_set(min_delay=1, max_delay=30)
+        self._client.on_message = self._on_message
         self._host, self._port = host, port
+        self._subs: dict[str, Callable[[str, bytes], None]] = {}
+
+    def subscribe(self, topic: str, callback: Callable[[str, bytes], None]) -> None:
+        """Subscribe to prefix/topic; callback(full_topic, payload). Survives reconnects."""
+        full = f"{self.prefix}/{topic}"
+        self._subs[full] = callback
+        if self._client.is_connected():
+            self._client.subscribe(full, qos=1)
+
+    def _on_message(self, client, userdata, msg) -> None:
+        for pattern, cb in self._subs.items():
+            if mqtt.topic_matches_sub(pattern, msg.topic):
+                try:
+                    cb(msg.topic, msg.payload)
+                except Exception:  # noqa: BLE001 - a bad message must not kill the client
+                    log.exception("MQTT handler failed for %s", msg.topic)
 
     def start(self) -> None:
         self._client.connect_async(self._host, self._port, keepalive=30)
@@ -33,6 +50,8 @@ class Publisher:
             return
         log.info("MQTT connected to %s:%s", self._host, self._port)
         client.publish(self.available_topic, "online", qos=1, retain=True)
+        for topic in self._subs:
+            client.subscribe(topic, qos=1)
 
     def publish(self, topic: str, payload: Any, retain: bool = False) -> None:
         if not isinstance(payload, (str, bytes)):

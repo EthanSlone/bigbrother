@@ -4,9 +4,9 @@ A self-hosted NVR built to replace Frigate: proven plumbing (go2rtc, ffmpeg) wit
 detection, verification and alerting on top. The design and decisions live in the
 "NVR Tool" project (`design/architecture.md`).
 
-**Status: Phase 2.** Camera probe, go2rtc stream hub, 24/7 recording with retention, object
-detection with tracking and a debug viewer, and an MQTT event bus. Next come alerts
-(Phase 3), then the app (Phase 4).
+**Status: Phase 3.** Camera probe, go2rtc stream hub, 24/7 recording with retention, object
+detection with tracking, zones and masks, alerts to your phone via Pushover with a
+second-opinion check, a debug viewer, and an MQTT event bus. The app (Phase 4) comes next.
 
 ```
 Cameras ──RTSP──> go2rtc ─┬─ main ──> recorder ──> /recordings/<camera>/<date>/<hour>/<MM.SS>.mp4
@@ -131,8 +131,10 @@ that way on this PC. On the Proxmox server, set `RECORDINGS_PATH` to a path on t
 | `docker compose run --rm tools configure` | Validates `cameras.yml`, checks `.env`, writes `config/generated/go2rtc.yaml` (holds no secrets; go2rtc reads them from the environment) |
 | `docker compose run --rm tools probe` | Phase 0 camera report |
 | `docker compose run --rm tools fakecam` | Turns clips in `testdata/` into fake cameras |
+| `docker compose run --rm tools test-alert` | Sends one test notification |
+| `docker compose logs -f alerter` | Alert decisions as they happen |
 | `docker compose --profile fakecam up -d` | Starts the stack plus the fake cameras |
-| `docker compose up -d` | Starts go2rtc, mosquitto, the recorder and the detector |
+| `docker compose up -d` | Starts go2rtc, mosquitto, the recorder, the detector and the alerter |
 | `docker compose logs -f detector` | Detector log; per-camera stats print every minute |
 | `docker compose run --rm tools evaluate /testdata/parking_lot.mp4 --fps 5 2` | Runs a clip through detection offline and counts events, to compare settings |
 | `docker compose restart go2rtc recorder` | Applies camera changes after re-running `configure` |
@@ -171,6 +173,55 @@ that way on this PC. On the Proxmox server, set `RECORDINGS_PATH` to a path on t
 - **yolox_s:** found every person, cyclist and car, at ~40 ms per frame per 2 cores.
 - **yolox_m:** ~2x slower for a small gain. It's reserved for the Phase 3 "second opinion"
   check before alerts.
+
+## Alerts
+
+The **alerter** service listens for detector events and, for each one, decides, verifies
+and notifies:
+
+1. **Rules** (per camera, under `alert:`):
+   - **Object:** is it an object that alerts on this camera (`labels`)?
+   - **Armed:** are alerts armed?
+   - **Schedule:** is it inside the alert schedule?
+   - **Moving:** is it moving? Parked cars never alert.
+   - **Zone:** has it entered a required zone (`zones`)?
+   - **Cooldown:** has no alert for the same camera and object type gone out within
+     `cooldown_seconds`?
+
+   Rules are re-checked while the object stays in view, so a person who walks onto the
+   porch a few seconds later still triggers the alert.
+2. **Second opinion:**
+   - The alerter grabs a full-resolution frame from go2rtc and runs the bigger YOLOX-m
+     model on the area around the object.
+   - If the object has already moved on, it checks the detector's own snapshot instead,
+     which comes from the exact moment of detection.
+   - The alert is only sent if the bigger model also sees the same kind of object. It
+     tries up to 3 times.
+3. **Notification:**
+   - Pushover delivers it to iPhone and Android, with the full-res picture and the
+     object boxed.
+   - It's sent once per event.
+   - A 4xx error is never retried, as Pushover asks. Server errors are retried after 5 s.
+
+**Every event gets an outcome**, shown in the viewer's *Alert* column:
+- **sent**, **logged** (no Pushover keys set) or **failed**,
+- or **not sent**, with the reason. For example: "cooldown: a person alert was sent 14s ago",
+  "hasn't entered porch", "second opinion found no person", or "disarmed".
+
+Click an alert badge to see the exact picture that was sent.
+
+**Arm or disarm** with the button at the top of the viewer, or over MQTT: publish `on` or
+`off` to `bigbrother/alerts/armed/set`. The state is published to `bigbrother/alerts/armed`.
+
+**Set up Pushover:**
+1. Create an account at pushover.net and install the app on your phone (30-day free
+   trial).
+2. Create an Application on pushover.net.
+3. Put your user key and the app token in `.env` as `PUSHOVER_USER` / `PUSHOVER_TOKEN`.
+4. Run `docker compose up -d alerter`.
+5. Check it with `docker compose run --rm tools test-alert`.
+
+The verifier model, YOLOX-m (~100 MB), downloads on first start.
 
 ## How recording works
 

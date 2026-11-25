@@ -25,8 +25,9 @@ HEADER = """\
 
 LOOP = "ffmpeg -hide_banner -v error -re -stream_loop -1 -i {path}"
 MAIN = LOOP + " -c copy -rtsp_transport tcp -f rtsp {{output}}"
-SUB = (LOOP + " -an -c:v libx264 -preset superfast -tune zerolatency -g 30"
-       " -vf scale=640:-2 -rtsp_transport tcp -f rtsp {{output}}")
+# The substream is transcoded from the main stream inside go2rtc, so both show the same
+# moment, like a real camera. (Two separate loops of the file would drift apart.)
+SUB = "ffmpeg:{cid}_main#video=h264#width=640"
 
 
 def camera_id_for(path: Path) -> str:
@@ -57,7 +58,7 @@ def build_fakecam_config(videos: dict[str, Path], container_dir: str = "/testdat
         if " " in path:
             path = f'"{path}"'
         streams[f"{cid}_main"] = f"exec:{MAIN.format(path=path)}"
-        streams[f"{cid}_sub"] = f"exec:{SUB.format(path=path)}"
+        streams[f"{cid}_sub"] = SUB.format(cid=cid)
     return {
         "api": {"listen": ":1984"},
         # Same login as the real cameras; go2rtc expands these from .env.

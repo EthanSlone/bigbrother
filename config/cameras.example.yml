@@ -11,6 +11,19 @@ detector:
   # threads: 0            # threads per inference, 0 = automatic
   # workers: 0            # parallel inferences, 0 = automatic (1 per 8 CPUs)
 
+# Alerts: what gets sent to your phone (Pushover keys go in .env).
+alerts:
+  enabled: true
+  notifier: pushover       # pushover | log (log = record only, don't send)
+  timezone: America/New_York
+  verify: true             # second opinion with a bigger model on the full-res frame
+  verify_model: yolox_m
+  verify_threshold: 0.5
+  # public_url: https://nvr.example.com   # adds a "View clip" link once the app exists
+  pushover:
+    priority: 0            # -2 silent ... 1 high (bypasses quiet hours)
+    sound: ""              # "" = your Pushover default
+
 # Defaults applied to every camera (each camera can override).
 defaults:
   record:
@@ -25,6 +38,12 @@ defaults:
     min_score: 0.2        # weakest detection kept (below 0.5 it can only extend an existing track)
     threshold: 0.6        # median score an object needs to become an event
     min_frames: 3         # ...seen on at least this many frames
+  alert:
+    labels: [person]      # which objects alert
+    zones: []             # if set, the object must enter one of these zones
+    cooldown_seconds: 60  # no repeat alert for the same camera + object within this
+    schedule: []          # empty = any time. e.g. only at night:
+    #   - {days: [mon, tue, wed, thu, fri, sat, sun], start: "22:00", end: "06:30"}
 
 storage:
   retention_days: 30      # delete recordings older than this
@@ -59,6 +78,9 @@ cameras:
       motion:                    # ignore movement here (trees, the camera's timestamp)
         - [[0.0, 0.0], [0.4, 0.0], [0.4, 0.06], [0.0, 0.06]]
       objects: []                # drop detections whose ground point is in here
+    alert:
+      labels: [person, car]
+      zones: [driveway]          # only alert once something enters the driveway zone
 
   # A public live feed (HLS) also works, e.g. a state DOT traffic camera. Find current
   # URLs on your state's 511 site; they change. Prefix with ffmpeg: and add #video=copy.

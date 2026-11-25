@@ -122,6 +122,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
     workers: list = []
     by_id: dict = {}
     store: EventStore | None = None
+    alerts = None              # AlertStore
+    publish = None             # (topic, payload, retain) -> None
     data_dir: Path = Path("/data")
 
     def log_message(self, fmt, *args):  # quiet: the page polls constantly
@@ -158,7 +160,22 @@ class ViewerHandler(BaseHTTPRequestHandler):
             if path == "/api/events":
                 limit = min(int(q.get("limit", ["50"])[0]), 500)
                 cam = q.get("camera", [None])[0]
-                return self.send_json([e.to_dict() for e in self.store.recent(limit, cam)])
+                events = self.store.recent(limit, cam)
+                alerts = self.alerts.for_events([e.id for e in events]) if self.alerts else {}
+                out = []
+                for e in events:
+                    d = e.to_dict()
+                    a = alerts.get(e.id)
+                    d["alert"] = a.to_dict() if a else None
+                    out.append(d)
+                return self.send_json(out)
+            if path == "/api/armed":
+                return self.send_json({"armed": self.alerts.armed() if self.alerts else True})
+            if path.startswith("/alert/") and path.endswith(".jpg"):
+                a = self.alerts.get(path[len("/alert/"):-4]) if self.alerts else None
+                if a and a.image and (self.data_dir / a.image).exists():
+                    return self.send_body(200, (self.data_dir / a.image).read_bytes(), "image/jpeg")
+                return self.not_found()
             if path.startswith("/live/") and path.endswith(".jpg"):
                 # Long-poll: wait (briefly) for a frame newer than ?after=, so the page
                 # receives each decoded frame once, at the decoder's pace.
@@ -195,10 +212,27 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
     do_HEAD = do_GET
 
+    def do_POST(self):  # noqa: N802
+        path = urlparse(self.path).path.rstrip("/")
+        try:
+            length = min(int(self.headers.get("Content-Length") or 0), 65536)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if path == "/api/armed" and self.alerts is not None:
+                on = bool(body.get("armed"))
+                self.alerts.set_armed(on)
+                if self.publish:  # let the alerter (and Home Assistant later) know too
+                    self.publish("alerts/armed/set", "on" if on else "off", False)
+                return self.send_json({"armed": on})
+            return self.not_found()
+        except (ValueError, json.JSONDecodeError):
+            return self.send_json({"error": "bad request"}, 400)
 
-def start_viewer(workers, store: EventStore, data_dir: Path, port: int) -> ThreadingHTTPServer:
+
+def start_viewer(workers, store: EventStore, data_dir: Path, port: int, alerts=None,
+                 publish=None) -> ThreadingHTTPServer:
     handler = type("Handler", (ViewerHandler,), {
         "workers": workers, "by_id": {w.cam.id: w for w in workers}, "store": store, "data_dir": data_dir,
+        "alerts": alerts, "publish": staticmethod(publish) if publish else None,
     })
     server = ThreadingHTTPServer(("0.0.0.0", port), handler)
     server.daemon_threads = True

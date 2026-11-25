@@ -5,6 +5,8 @@
     python -m bigbrother fakecam     turn clips in testdata/ into fake RTSP cameras
     python -m bigbrother recorder    run the recording service
     python -m bigbrother detector    run the detection service (+ debug viewer)
+    python -m bigbrother alerter     run the alert service (rules, second opinion, Pushover)
+    python -m bigbrother test-alert  send one test notification
     python -m bigbrother models      download/verify built-in detection models
     python -m bigbrother evaluate    run clips through detection offline and count events
 """
@@ -102,6 +104,20 @@ def _evaluate(args) -> int:
     return 0
 
 
+def _alerter(args) -> int:
+    from .alerts.service import run
+
+    cfg = load_config(args.config)
+    run(cfg, Path(args.data), Path(args.db))
+    return 0
+
+
+def _test_alert(args) -> int:
+    from .alerts.service import send_test
+
+    return send_test(load_config(args.config))
+
+
 def _models(args) -> int:
     from .detector.model_store import BUILTIN, resolve_model
 
@@ -150,6 +166,14 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--db", default="/data/bigbrother.db")
     d.add_argument("--viewer-port", type=int, default=5050, help="debug viewer port (0 = off)")
     d.set_defaults(func=_detector)
+
+    al = sub.add_parser("alerter", help="run the alert service")
+    al.add_argument("--data", default="/data")
+    al.add_argument("--db", default="/data/bigbrother.db")
+    al.set_defaults(func=_alerter)
+
+    ta = sub.add_parser("test-alert", help="send one test notification")
+    ta.set_defaults(func=_test_alert)
 
     ev = sub.add_parser("evaluate", help="run clips through detection and count events")
     ev.add_argument("clips", nargs="+")

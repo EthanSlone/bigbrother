@@ -1,6 +1,6 @@
 name: bigbrother
 
-# Stack: stream hub, event bus, recorder, detector (+ optional fake cameras).
+# Stack: stream hub, event bus, recorder, detector, alerter (+ optional fake cameras).
 # First run:   docker compose run --rm tools configure
 # Then:        docker compose up -d --build
 
@@ -54,7 +54,21 @@ services:
     depends_on: [go2rtc, mosquitto]
     stop_grace_period: 15s
 
-  # One-off commands: `docker compose run --rm tools configure|probe|fakecam|evaluate`
+  alerter:
+    build: .
+    image: bigbrother:dev
+    command: ["alerter"]
+    restart: unless-stopped
+    env_file: .env            # PUSHOVER_USER / PUSHOVER_TOKEN
+    environment:
+      BB_LOG_LEVEL: ${BB_LOG_LEVEL:-INFO}
+    volumes:
+      - ./config:/config:ro
+      - data:/data
+      - models:/models
+    depends_on: [go2rtc, mosquitto, detector]
+
+  # One-off commands: `docker compose run --rm tools configure|probe|fakecam|evaluate|test-alert`
   tools:
     build: .
     image: bigbrother:dev

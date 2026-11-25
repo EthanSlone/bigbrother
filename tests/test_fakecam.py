@@ -32,7 +32,7 @@ def test_fakecam_config_loops_and_requires_login():
     main = cfg["streams"]["front_door_main"]
     assert main.startswith("exec:ffmpeg") and "-stream_loop -1" in main
     assert '"/testdata/Front Door.mp4"' in main and main.endswith("{output}")
-    assert "scale=640:-2" in cfg["streams"]["front_door_sub"]
+    assert cfg["streams"]["front_door_sub"] == "ffmpeg:front_door_main#video=h264#width=640"
     assert cfg["rtsp"]["password"] == "${CAM_PASSWORD}"
 
 

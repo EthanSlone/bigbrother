@@ -18,6 +18,11 @@ main{padding:16px 20px;display:grid;gap:20px}
 table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
 th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;font-size:13px;vertical-align:middle}
 th{color:var(--dim);font-weight:500;font-size:12px}td img{height:54px;border-radius:4px;cursor:zoom-in;display:block}
+.armed.on{background:#1f3a24;border-color:#2f6b3a;color:#8fe39b}.armed.off{background:#3a1f1f;border-color:#6b2f2f;color:#f0a0a0}
+.al{font-size:11px;padding:1px 7px;border-radius:9px;white-space:nowrap;cursor:default}
+.al.sent{background:#1f3a24;color:var(--ok)}.al.logged{background:#1d3347;color:var(--blue)}.al.failed{background:#3a1f1f;color:var(--bad)}
+.al.pending,.al.suppressed{background:#2a313a;color:var(--dim)}.al[data-img]{cursor:zoom-in}
+.reason{display:block;font-size:11px;color:var(--dim);max-width:260px;margin-top:2px}
 .tag{font-size:11px;padding:1px 6px;border-radius:9px;background:#2a313a;color:var(--dim);white-space:nowrap}.live{background:#1f3a24;color:var(--ok)}.zone{background:#1d3347;color:var(--blue)}
 button{font:inherit;font-size:12px;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer}
 button:hover{border-color:#3d4752}button.primary{background:#1d3347;border-color:#2c5578;color:#cfe6ff}
@@ -37,10 +42,11 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
 #zed .hint{font-size:12px;color:var(--dim)}
 </style></head><body>
 <header><h1>BigBrother detector</h1><span>debug viewer: not the real app</span>
+<button id="armed" class="armed" title="Arm or disarm alerts">Alerts: …</button>
 <div class="legend"><span><i class="sw" style="background:var(--ok)"></i>event</span><span><i class="sw" style="background:var(--warn)"></i>tracking (unconfirmed)</span><span><i class="sw" style="background:#969696"></i>stationary</span><span><i class="sw" style="background:var(--bad)"></i>motion</span><span><i class="sw" style="background:var(--blue)"></i>zone</span><span><i class="sw" style="background:#555"></i>motion mask</span><span><i class="sw" style="background:var(--orange)"></i>object mask</span></div></header>
 <main><section class="cams" id="cams"></section>
 <section><h2>Recent events</h2>
-<table><thead><tr><th>Snapshot</th><th>Camera</th><th>Object</th><th>Score</th><th>Zones</th><th>Started</th><th>Duration</th><th></th></tr></thead><tbody id="events"></tbody></table></section></main>
+<table><thead><tr><th>Snapshot</th><th>Camera</th><th>Object</th><th>Score</th><th>Zones</th><th>Started</th><th>Duration</th><th>Alert</th><th></th></tr></thead><tbody id="events"></tbody></table></section></main>
 
 <dialog id="dlg" onclick="this.close()"><img id="big" alt=""></dialog>
 
@@ -106,9 +112,25 @@ async function events(){
    `<td>${esc(e.camera)}</td><td>${esc(e.label)}</td><td>${e.median_score.toFixed(2)} / ${e.top_score.toFixed(2)}</td>`+
    `<td>${(e.zones||[]).map(z=>`<span class="tag zone">${esc(z)}</span>`).join(' ')}</td>`+
    `<td>${new Date(e.start_ts*1000).toLocaleTimeString()}</td><td>${fmtDur(e.start_ts,e.end_ts)}</td>`+
+   `<td>${alertCell(e.alert)}</td>`+
    `<td>${e.end_ts?'':'<span class="tag live">in view</span>'} ${e.stationary?'<span class="tag">stationary</span>':''}</td></tr>`).join('');
 }
-evEl.addEventListener('click',e=>{if(e.target.tagName==='IMG'){document.getElementById('big').src=e.target.src;document.getElementById('dlg').showModal();}});
+const AL_TEXT={sent:'✓ sent',logged:'logged',failed:'✗ failed',pending:'waiting',suppressed:'not sent'};
+function alertCell(a){
+  if(!a)return '<span class="al suppressed">–</span>';
+  const img=a.image?` data-img="alert/${esc(a.event_id)}.jpg"`:'';
+  const why=a.reason&&a.status!=='sent'?`<span class="reason">${esc(a.reason)}</span>`:'';
+  const score=a.verify_score!=null?` title="second opinion ${a.verify_score.toFixed(2)}"`:'';
+  return `<span class="al ${esc(a.status)}"${img}${score}>${AL_TEXT[a.status]||esc(a.status)}</span>${why}`;
+}
+evEl.addEventListener('click',e=>{const src=e.target.tagName==='IMG'?e.target.src:e.target.dataset.img;
+  if(src){document.getElementById('big').src=src;document.getElementById('dlg').showModal();}});
+const armedBtn=document.getElementById('armed');
+function showArmed(on){armedBtn.textContent=on?'Alerts: armed':'Alerts: disarmed';armedBtn.className='armed '+(on?'on':'off');armedBtn.dataset.on=on?'1':'0';}
+armedBtn.onclick=async()=>{const on=armedBtn.dataset.on!=='1';
+  const r=await fetch('api/armed',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({armed:on})});
+  showArmed((await r.json()).armed);};
+fetch('api/armed').then(r=>r.json()).then(j=>showArmed(j.armed));
 
 /* ---------- zone & mask editor ---------- */
 const zed=document.getElementById('zed'),zsvg=document.getElementById('zsvg');

@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+import datetime as _dt
+
 import yaml
 
 from .zones import ZONE_NAME, Polygon, Zone, ZoneConfigError, parse_polygon
@@ -66,6 +68,47 @@ class DetectorSettings:
     workers: int = 0           # inferences run in parallel; 0 = automatic (1 per 8 CPUs)
 
 
+DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+@dataclass(frozen=True)
+class Schedule:
+    """A window when alerts are allowed. end < start means it runs past midnight."""
+    days: frozenset[int]   # 0 = Monday
+    start: _dt.time
+    end: _dt.time
+
+    def active(self, now: _dt.datetime) -> bool:
+        t, day = now.time(), now.weekday()
+        if self.start <= self.end:
+            return day in self.days and self.start <= t < self.end
+        # Overnight window: the part after midnight belongs to the previous day's window.
+        return (day in self.days and t >= self.start) or ((day - 1) % 7 in self.days and t < self.end)
+
+
+@dataclass(frozen=True)
+class CameraAlertSettings:
+    enabled: bool = True
+    labels: tuple[str, ...] = ("person",)
+    zones: tuple[str, ...] = ()           # if set, the object must enter one of these
+    cooldown_seconds: int = 60            # no repeat alert for the same camera + object type
+    schedule: tuple[Schedule, ...] = ()   # empty = any time
+
+
+@dataclass(frozen=True)
+class AlertSettings:
+    enabled: bool = True
+    notifier: str = "pushover"            # pushover | log
+    timezone: str = "UTC"                 # for schedules and times in notifications
+    verify: bool = True                   # second opinion on the full-resolution frame
+    verify_model: str = "yolox_m"
+    verify_threshold: float = 0.5
+    public_url: str = ""                  # e.g. https://nvr.example.com (links in notifications, Phase 4)
+    priority: int = 0                     # Pushover priority -2..1
+    sound: str = ""                       # Pushover sound name ("" = your default)
+    threads: int = 0                      # inference threads for the verifier (0 = auto)
+
+
 @dataclass(frozen=True)
 class Camera:
     id: str
@@ -77,6 +120,7 @@ class Camera:
     zones: dict[str, Zone] = field(default_factory=dict)
     motion_masks: tuple[Polygon, ...] = ()
     object_masks: tuple[Polygon, ...] = ()
+    alert: CameraAlertSettings = field(default_factory=CameraAlertSettings)
 
     @property
     def main_stream(self) -> str:
@@ -105,10 +149,12 @@ class Config:
     cameras: dict[str, Camera]
     storage: StorageSettings = field(default_factory=StorageSettings)
     detector: DetectorSettings = field(default_factory=DetectorSettings)
+    alerts: AlertSettings = field(default_factory=AlertSettings)
     go2rtc_url: str = "rtsp://go2rtc:8554"
     mqtt_host: str = "mosquitto"
     mqtt_port: int = 1883
     mqtt_prefix: str = "bigbrother"
+    go2rtc_api: str = "http://go2rtc:1984"
 
     def env_refs(self) -> set[str]:
         """All environment variable names referenced by stream URLs."""
@@ -275,6 +321,91 @@ def _masks(raw: Any, where: str) -> tuple[tuple[Polygon, ...], tuple[Polygon, ..
     return out[0], out[1]
 
 
+def _time(value: Any, where: str) -> _dt.time:
+    try:
+        return _dt.time.fromisoformat(str(value))
+    except ValueError as exc:
+        raise ConfigError(f"{where} must be a time like \"22:00\", got {value!r}") from exc
+
+
+def _schedule(raw: Any, where: str) -> tuple[Schedule, ...]:
+    if not raw:
+        return ()
+    if not isinstance(raw, list):
+        raise ConfigError(f"{where} must be a list of {{days, start, end}} windows")
+    out = []
+    for i, w in enumerate(raw):
+        ww = f"{where}[{i}]"
+        if not isinstance(w, dict) or set(w) - {"days", "start", "end"} or "start" not in w or "end" not in w:
+            raise ConfigError(f"{ww} needs start and end (and optionally days)")
+        days = w.get("days", list(DAYS))
+        if not isinstance(days, list) or not all(isinstance(d, str) and d.lower()[:3] in DAYS for d in days):
+            raise ConfigError(f"{ww}.days must be a list like [mon, tue, sat]")
+        out.append(Schedule(frozenset(DAYS.index(d.lower()[:3]) for d in days),
+                            _time(w["start"], f"{ww}.start"), _time(w["end"], f"{ww}.end")))
+    return tuple(out)
+
+
+def _camera_alert(raw: Any, base: CameraAlertSettings, where: str) -> CameraAlertSettings:
+    if raw is None:
+        return base
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a mapping")
+    unknown = set(raw) - {"enabled", "labels", "zones", "cooldown_seconds", "schedule"}
+    if unknown:
+        raise ConfigError(f"{where}: unknown key(s) {sorted(unknown)}")
+    for key in ("labels", "zones"):
+        v = raw.get(key)
+        if v is not None and (not isinstance(v, list) or not all(isinstance(x, str) for x in v)):
+            raise ConfigError(f"{where}.{key} must be a list of names")
+    return CameraAlertSettings(
+        enabled=bool(raw.get("enabled", base.enabled)),
+        labels=tuple(raw["labels"]) if "labels" in raw else base.labels,
+        zones=tuple(raw["zones"]) if "zones" in raw else base.zones,
+        cooldown_seconds=_as_int(raw.get("cooldown_seconds", base.cooldown_seconds),
+                                 f"{where}.cooldown_seconds", 0),
+        schedule=_schedule(raw["schedule"], f"{where}.schedule") if "schedule" in raw else base.schedule,
+    )
+
+
+def _alert_settings(raw: Any) -> AlertSettings:
+    if raw is None:
+        return AlertSettings()
+    if not isinstance(raw, dict):
+        raise ConfigError("alerts must be a mapping")
+    unknown = set(raw) - {"enabled", "notifier", "timezone", "verify", "verify_model", "verify_threshold",
+                          "public_url", "pushover", "threads"}
+    if unknown:
+        raise ConfigError(f"alerts: unknown key(s) {sorted(unknown)}")
+    notifier = str(raw.get("notifier", "pushover"))
+    if notifier not in ("pushover", "log"):
+        raise ConfigError("alerts.notifier must be pushover or log")
+    tz = str(raw.get("timezone", "UTC"))
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(tz)
+    except Exception as exc:  # noqa: BLE001
+        raise ConfigError(f"alerts.timezone: unknown time zone {tz!r} (use e.g. America/New_York)") from exc
+    po = raw.get("pushover") or {}
+    if not isinstance(po, dict) or set(po) - {"priority", "sound"}:
+        raise ConfigError("alerts.pushover may contain priority and sound")
+    priority = po.get("priority", 0)
+    if priority not in (-2, -1, 0, 1):
+        raise ConfigError("alerts.pushover.priority must be -2, -1, 0 or 1 (2/emergency is not supported)")
+    return AlertSettings(
+        enabled=bool(raw.get("enabled", True)),
+        notifier=notifier,
+        timezone=tz,
+        verify=bool(raw.get("verify", True)),
+        verify_model=str(raw.get("verify_model", "yolox_m")),
+        verify_threshold=_number(raw.get("verify_threshold", 0.5), "alerts.verify_threshold", 0.05, 0.99),
+        public_url=str(raw.get("public_url", "")).rstrip("/"),
+        priority=priority,
+        sound=str(po.get("sound", "")),
+        threads=_as_int(raw.get("threads", 0), "alerts.threads", 0),
+    )
+
+
 def parse_config(data: Any) -> Config:
     if not isinstance(data, dict):
         raise ConfigError("cameras.yml must be a mapping at the top level")
@@ -284,6 +415,7 @@ def parse_config(data: Any) -> Config:
         raise ConfigError("defaults must be a mapping")
     base_record = _record_settings(defaults.get("record"), RecordSettings(), "defaults.record")
     base_detect = _detect_settings(defaults.get("detect"), DetectSettings(), "defaults.detect")
+    base_alert = _camera_alert(defaults.get("alert"), CameraAlertSettings(), "defaults.alert")
 
     storage_raw = data.get("storage") or {}
     if not isinstance(storage_raw, dict):
@@ -328,6 +460,11 @@ def parse_config(data: Any) -> Config:
                     "reference it as ${VAR}"
                 )
         masks = _masks(raw.get("masks"), f"{where}.masks")
+        zones = _zones(raw.get("zones"), f"{where}.zones")
+        alert = _camera_alert(raw.get("alert"), base_alert, f"{where}.alert")
+        missing = [z for z in alert.zones if z not in zones]
+        if missing:
+            raise ConfigError(f"{where}.alert.zones: no zone named {', '.join(missing)} on this camera")
         cameras[cam_id] = Camera(
             id=cam_id,
             name=str(raw.get("name") or cam_id.replace("_", " ").title()),
@@ -335,9 +472,10 @@ def parse_config(data: Any) -> Config:
             sub=streams.get("sub"),
             record=_record_settings(raw.get("record"), base_record, f"{where}.record"),
             detect=_detect_settings(raw.get("detect"), base_detect, f"{where}.detect"),
-            zones=_zones(raw.get("zones"), f"{where}.zones"),
+            zones=zones,
             motion_masks=masks[0],
             object_masks=masks[1],
+            alert=alert,
         )
 
     mqtt = data.get("mqtt") or {}
@@ -345,10 +483,12 @@ def parse_config(data: Any) -> Config:
         cameras=cameras,
         storage=storage,
         detector=_detector_settings(data.get("detector")),
+        alerts=_alert_settings(data.get("alerts")),
         go2rtc_url=str(data.get("go2rtc_url", "rtsp://go2rtc:8554")),
         mqtt_host=str(mqtt.get("host", "mosquitto")),
         mqtt_port=_as_int(mqtt.get("port", 1883), "mqtt.port", 1),
         mqtt_prefix=str(mqtt.get("prefix", "bigbrother")),
+        go2rtc_api=str(data.get("go2rtc_api", "http://go2rtc:1984")).rstrip("/"),
     )
 
 

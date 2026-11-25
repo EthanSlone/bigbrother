@@ -175,7 +175,10 @@ def run(cfg: Config, data_dir: Path, db_path: Path, viewer_port: int) -> None:
 
     from .viewer import start_viewer
 
-    server = start_viewer(workers, store, data_dir, viewer_port) if viewer_port else None
+    from ..alerts_db import AlertStore
+
+    server = (start_viewer(workers, store, data_dir, viewer_port, AlertStore(db_path), publish)
+              if viewer_port else None)
 
     try:
         while not stop.is_set():

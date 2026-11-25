@@ -116,6 +116,17 @@ class EventStore:
         r["stationary"] = bool(r["stationary"])
         return Event(**r)
 
+    def delete_older_than(self, cutoff_ts: float, limit: int = 1000) -> list[Event]:
+        """Remove ended events that started before cutoff; returns them (to delete their files)."""
+        with self._lock:
+            cur = self._db.execute(
+                "SELECT * FROM events WHERE end_ts IS NOT NULL AND start_ts < ? ORDER BY start_ts LIMIT ?",
+                (cutoff_ts, limit))
+            cols = [c[0] for c in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            self._db.executemany("DELETE FROM events WHERE id = ?", [(r["id"],) for r in rows])
+        return [self._row(r) for r in rows]
+
     def close(self) -> None:
         with self._lock:
             self._db.close()

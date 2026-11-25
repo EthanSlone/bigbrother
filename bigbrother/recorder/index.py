@@ -73,6 +73,23 @@ class RecordingIndex:
         with self._lock:
             self._db.executemany("DELETE FROM recordings WHERE path = ?", [(p,) for p in paths])
 
+    def between(self, camera: str, start_ts: float, end_ts: float) -> list[tuple[int, Segment]]:
+        """(row id, segment) for every segment overlapping [start_ts, end_ts], oldest first."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, camera, start_ts, end_ts, path, size_bytes FROM recordings "
+                "WHERE camera = ? AND end_ts > ? AND start_ts < ? ORDER BY start_ts",
+                (camera, start_ts, end_ts),
+            ).fetchall()
+        return [(r[0], Segment(*r[1:])) for r in rows]
+
+    def by_id(self, row_id: int) -> Segment | None:
+        with self._lock:
+            r = self._db.execute(
+                "SELECT camera, start_ts, end_ts, path, size_bytes FROM recordings WHERE id = ?", (row_id,)
+            ).fetchone()
+        return Segment(*r) if r else None
+
     def count(self, camera: str | None = None) -> int:
         with self._lock:
             if camera:

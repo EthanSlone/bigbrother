@@ -136,7 +136,8 @@ class CameraWorker(threading.Thread):
         }
 
 
-def run(cfg: Config, data_dir: Path, db_path: Path, viewer_port: int) -> None:
+def run(cfg: Config, data_dir: Path, db_path: Path, viewer_port: int,
+        recordings_root: Path = Path("/recordings")) -> None:
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
@@ -176,9 +177,15 @@ def run(cfg: Config, data_dir: Path, db_path: Path, viewer_port: int) -> None:
     from .viewer import start_viewer
 
     from ..alerts_db import AlertStore
+    from ..playback import Playback
+    from ..recorder.index import RecordingIndex
+    from .viewer import ROUTES
 
-    server = (start_viewer(workers, store, data_dir, viewer_port, AlertStore(db_path), publish)
-              if viewer_port else None)
+    server = None
+    if viewer_port:
+        Playback(RecordingIndex(db_path), recordings_root, data_dir, store,
+                 {c.id: c.record.segment_seconds for c in cfg.cameras.values()}).register(ROUTES)
+        server = start_viewer(workers, store, data_dir, viewer_port, AlertStore(db_path), publish)
 
     try:
         while not stop.is_set():

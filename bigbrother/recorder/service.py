@@ -30,7 +30,7 @@ def run(cfg: Config, recordings_root: Path, db_path: Path) -> None:
     index = RecordingIndex(db_path)
     organizer = Organizer(recordings_root, index,
                           {c.id: c.record.segment_seconds for c in cfg.cameras.values()})
-    retention = Retention(cfg, recordings_root, index)
+    retention = Retention(cfg, recordings_root, index, data_dir=db_path.parent, db_path=db_path)
 
     mqtt = None
     if os.environ.get("BB_MQTT", "1") != "0":

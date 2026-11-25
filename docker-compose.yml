@@ -49,6 +49,7 @@ services:
       - ./config:/config:ro
       - data:/data            # events database + snapshots (shared with the recorder)
       - models:/models        # downloaded detection models
+      - ${RECORDINGS_PATH:-recordings}:/recordings:ro   # for playback in the viewer
     ports:
       - "127.0.0.1:5050:5050" # debug viewer, local only
     depends_on: [go2rtc, mosquitto]

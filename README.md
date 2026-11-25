@@ -6,7 +6,8 @@ detection, verification and alerting on top. The design and decisions live in th
 
 **Status: Phase 3.** Camera probe, go2rtc stream hub, 24/7 recording with retention, object
 detection with tracking, zones and masks, alerts to your phone via Pushover with a
-second-opinion check, a debug viewer, and an MQTT event bus. The app (Phase 4) comes next.
+second-opinion check, recording playback (event clips and a timeline), a debug viewer, and
+an MQTT event bus. The app (Phase 4) comes next.
 
 ```
 Cameras ──RTSP──> go2rtc ─┬─ main ──> recorder ──> /recordings/<camera>/<date>/<hour>/<MM.SS>.mp4
@@ -68,6 +69,24 @@ with snapshots. Click a snapshot to enlarge it.
 
 The detection model (~36 MB) downloads automatically on first start. It's verified by
 checksum and cached in a Docker volume.
+
+### Playback
+
+- **Event clips:** every event in the viewer has a **▶ Clip** button. It plays the event
+  from 5 s before to 5 s after.
+- **Timeline:** shows each camera over the last 1, 6 or 24 hours. Grey is recorded, gaps
+  are missing footage, and ticks are events (green for people, blue for vehicles). Click
+  anywhere to play from that moment; playback continues across recordings. Click a tick
+  to play that event's clip.
+
+How clips are made:
+- They're stitched from the 1-minute recordings without re-encoding, so they're quick to
+  build and lossless. Cuts land on keyframes, so a clip can start or end a second early.
+- Recordings are written in 1-minute pieces, so the newest minute isn't playable until
+  that piece closes. A clip of something happening right now may stop early.
+- Clips are cached for 2 days and rebuilt on demand.
+- Events, their snapshots and alert pictures are kept as long as recordings
+  (`storage.retention_days`).
 
 ### Zones and masks
 

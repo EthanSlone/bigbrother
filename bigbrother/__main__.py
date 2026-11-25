@@ -84,7 +84,7 @@ def _detector(args) -> int:
     from .detector.service import run
 
     cfg = load_config(args.config)
-    run(cfg, Path(args.data), Path(args.db), args.viewer_port)
+    run(cfg, Path(args.data), Path(args.db), args.viewer_port, Path(args.recordings))
     return 0
 
 
@@ -165,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--data", default="/data")
     d.add_argument("--db", default="/data/bigbrother.db")
     d.add_argument("--viewer-port", type=int, default=5050, help="debug viewer port (0 = off)")
+    d.add_argument("--recordings", default="/recordings", help="recordings folder (read-only, for playback)")
     d.set_defaults(func=_detector)
 
     al = sub.add_parser("alerter", help="run the alert service")

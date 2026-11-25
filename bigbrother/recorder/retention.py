@@ -22,17 +22,24 @@ def disk_used_percent(path: Path) -> float:
     return usage.used / usage.total * 100 if usage.total else 0.0
 
 
+CLIP_CACHE_SECONDS = 2 * 86400  # event clips are rebuilt on demand, so keep them briefly
+
+
 class Retention:
     def __init__(self, cfg: Config, root: Path, index: RecordingIndex,
-                 disk_usage: DiskUsage = disk_used_percent):
+                 disk_usage: DiskUsage = disk_used_percent, data_dir: Path | None = None,
+                 db_path: Path | None = None):
         self.cfg = cfg
         self.root = root
         self.index = index
         self.disk_usage = disk_usage
+        self.data_dir = data_dir
+        self.db_path = db_path
 
     def run_once(self, now: float | None = None) -> dict[str, int]:
         now = time.time() if now is None else now
-        stats = {"age": self.enforce_age(now), "disk": self.enforce_disk(), "failed": self.clean_failed(now)}
+        stats = {"age": self.enforce_age(now), "disk": self.enforce_disk(), "failed": self.clean_failed(now),
+                 "events": self.prune_events(now), "clips": self.prune_clips(now)}
         if any(stats.values()):
             log.info("retention removed %s", stats)
         return stats
@@ -66,6 +73,39 @@ class Retention:
                 if now - p.stat().st_mtime > max_age_s:
                     p.unlink(missing_ok=True)
                     removed += 1
+        return removed
+
+    def prune_events(self, now: float) -> int:
+        """Events, their snapshots and alert pictures follow storage.retention_days."""
+        if self.data_dir is None or self.db_path is None:
+            return 0
+        from ..alerts_db import AlertStore
+        from ..events_db import EventStore
+
+        events, alerts = EventStore(self.db_path), AlertStore(self.db_path)
+        cutoff = now - self.cfg.storage.retention_days * 86400
+        removed = 0
+        try:
+            while batch := events.delete_older_than(cutoff):
+                for e in batch:
+                    if e.snapshot:
+                        (self.data_dir / e.snapshot).unlink(missing_ok=True)
+                for img in alerts.delete_for_events([e.id for e in batch]):
+                    (self.data_dir / img).unlink(missing_ok=True)
+                removed += len(batch)
+        finally:
+            events.close()
+            alerts.close()
+        return removed
+
+    def prune_clips(self, now: float) -> int:
+        if self.data_dir is None or not (self.data_dir / "clips").exists():
+            return 0
+        removed = 0
+        for p in (self.data_dir / "clips").rglob("*"):
+            if p.is_file() and now - p.stat().st_mtime > CLIP_CACHE_SECONDS:
+                p.unlink(missing_ok=True)
+                removed += 1
         return removed
 
     def _delete(self, segments: list[Segment]) -> int:

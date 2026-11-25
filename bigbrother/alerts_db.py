@@ -88,6 +88,13 @@ class AlertStore:
                 (camera, label)).fetchone()
         return row[0] if row else None
 
+    def delete_for_events(self, event_ids: list[str]) -> list[str]:
+        """Remove alert records for these events; returns their image paths."""
+        recs = self.for_events(event_ids)
+        with self._lock:
+            self._db.executemany("DELETE FROM alerts WHERE event_id = ?", [(i,) for i in event_ids])
+        return [r.image for r in recs.values() if r.image]
+
     # -- armed state -------------------------------------------------------
     def armed(self) -> bool:
         with self._lock:

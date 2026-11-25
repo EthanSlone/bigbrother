@@ -40,15 +40,35 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
 #zed ul{list-style:none;margin:0;padding:0;font-size:12px}#zed li{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--line)}
 #zed textarea{width:100%;height:190px;font:12px/1.4 ui-monospace,Consolas,monospace;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px}
 #zed .hint{font-size:12px;color:var(--dim)}
+.tlhead{display:flex;align-items:center;gap:10px;margin-bottom:8px}.tlhead h2{margin:0}.rng button.on{background:#1d3347;border-color:#2c5578}
+#tl{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;display:grid;gap:8px}
+.tlrow{display:grid;grid-template-columns:120px 1fr;gap:10px;align-items:center}.tlname{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tlbar{position:relative;height:26px;background:#0c0f12;border-radius:4px;cursor:pointer;overflow:hidden}
+.tlbar .rec{position:absolute;top:0;bottom:0;background:#2b3440}.tlbar .ev{position:absolute;top:3px;bottom:3px;width:3px;min-width:3px;border-radius:2px;background:var(--warn)}
+.tlbar .ev.person{background:var(--ok)}.tlbar .ev.car,.tlbar .ev.truck,.tlbar .ev.bus,.tlbar .ev.motorcycle{background:var(--blue)}
+.tlbar .now{position:absolute;top:0;bottom:0;width:2px;background:#dc3c3c88}
+.tlbar .hover{position:absolute;top:0;bottom:0;width:1px;background:#fff8;pointer-events:none;display:none}
+.tlaxis{display:grid;grid-template-columns:120px 1fr;gap:10px;font-size:11px;color:var(--dim)}.tlaxis div{display:flex;justify-content:space-between}
+#tltip{position:fixed;pointer-events:none;background:#000c;color:#fff;font-size:11px;padding:2px 6px;border-radius:4px;display:none;z-index:5}
+#player{width:min(1100px,96vw)}#player video{width:100%;display:block;background:#000;max-height:75vh}
+#player .pbar{display:flex;gap:12px;align-items:center;padding:8px 12px;font-size:12px;color:var(--dim)}#player .pbar b{color:var(--text)}
+#player .pbar button{margin-left:auto}
+button.play{padding:2px 8px}
 </style></head><body>
 <header><h1>BigBrother detector</h1><span>debug viewer: not the real app</span>
 <button id="armed" class="armed" title="Arm or disarm alerts">Alerts: …</button>
 <div class="legend"><span><i class="sw" style="background:var(--ok)"></i>event</span><span><i class="sw" style="background:var(--warn)"></i>tracking (unconfirmed)</span><span><i class="sw" style="background:#969696"></i>stationary</span><span><i class="sw" style="background:var(--bad)"></i>motion</span><span><i class="sw" style="background:var(--blue)"></i>zone</span><span><i class="sw" style="background:#555"></i>motion mask</span><span><i class="sw" style="background:var(--orange)"></i>object mask</span></div></header>
 <main><section class="cams" id="cams"></section>
+<section><div class="tlhead"><h2>Timeline</h2><span class="rng"><button data-h="1">1 h</button> <button data-h="6">6 h</button> <button data-h="24" class="on">24 h</button></span>
+<span style="font-size:12px;color:var(--dim)">grey = recorded · ticks = events · click anywhere to play from there</span></div>
+<div id="tl"></div></section>
 <section><h2>Recent events</h2>
-<table><thead><tr><th>Snapshot</th><th>Camera</th><th>Object</th><th>Score</th><th>Zones</th><th>Started</th><th>Duration</th><th>Alert</th><th></th></tr></thead><tbody id="events"></tbody></table></section></main>
+<table><thead><tr><th>Snapshot</th><th>Camera</th><th>Object</th><th>Score</th><th>Zones</th><th>Started</th><th>Duration</th><th>Alert</th><th></th><th></th></tr></thead><tbody id="events"></tbody></table></section></main>
 
 <dialog id="dlg" onclick="this.close()"><img id="big" alt=""></dialog>
+<div id="tltip"></div>
+<dialog id="player"><video id="pv" controls playsinline></video>
+  <div class="pbar"><b id="ptitle"></b><span id="ptime"></span><span id="pinfo"></span><button onclick="closePlayer()">Close</button></div></dialog>
 
 <dialog id="zed"><div class="wrap">
   <div class="stage"><img id="zimg" alt=""><svg id="zsvg" viewBox="0 0 1000 1000" preserveAspectRatio="none"></svg></div>
@@ -113,7 +133,8 @@ async function events(){
    `<td>${(e.zones||[]).map(z=>`<span class="tag zone">${esc(z)}</span>`).join(' ')}</td>`+
    `<td>${new Date(e.start_ts*1000).toLocaleTimeString()}</td><td>${fmtDur(e.start_ts,e.end_ts)}</td>`+
    `<td>${alertCell(e.alert)}</td>`+
-   `<td>${e.end_ts?'':'<span class="tag live">in view</span>'} ${e.stationary?'<span class="tag">stationary</span>':''}</td></tr>`).join('');
+   `<td>${e.end_ts?'':'<span class="tag live">in view</span>'} ${e.stationary?'<span class="tag">stationary</span>':''}</td>`+
+   `<td><button class="play" onclick="playClip('${esc(e.id)}','${esc(e.camera)} · ${esc(e.label)}')">▶ Clip</button></td></tr>`).join('');
 }
 const AL_TEXT={sent:'✓ sent',logged:'logged',failed:'✗ failed',pending:'waiting',suppressed:'not sent'};
 function alertCell(a){
@@ -207,5 +228,59 @@ function toYaml(){
   return out.join('\n')+'\n';
 }
 
-loadCameras();stats();setInterval(stats,2000);events();setInterval(events,3000);
+/* ---------- playback ---------- */
+const player=document.getElementById('player'),pv=document.getElementById('pv');
+const ptitle=document.getElementById('ptitle'),ptime=document.getElementById('ptime'),pinfo=document.getElementById('pinfo');
+let seq=null; // continuous playback across 1-minute recordings
+function closePlayer(){pv.pause();pv.removeAttribute('src');pv.load();seq=null;player.close();}
+player.addEventListener('close',()=>{pv.pause();seq=null;});
+async function playClip(id,title){
+  seq=null;ptitle.textContent=title;ptime.textContent='';pinfo.textContent='Preparing clip…';player.showModal();
+  const r=await fetch(`clip/${id}.mp4`,{method:'HEAD',cache:'no-store'});
+  if(!r.ok){pinfo.textContent='No recording covers this event yet. Recordings are saved in 1-minute pieces, so try again shortly.';return;}
+  pinfo.textContent=r.headers.get('X-Clip-Partial')==='1'?'Event still in progress or its last minute not saved yet: clip may stop early.':'';
+  pv.src=`clip/${id}.mp4?v=${Date.now()}`;pv.play().catch(()=>{});
+}
+async function playAt(cam,t){
+  const segs=await (await fetch(`api/segments?camera=${encodeURIComponent(cam)}&start=${t-180}&end=${t+6*3600}`)).json();
+  let i=segs.findIndex(s=>s.end>t);
+  ptitle.textContent=(cameras[cam]||{}).name||cam;pinfo.textContent='';player.showModal();
+  if(i<0){ptime.textContent='';pinfo.textContent='Nothing recorded at that time.';return;}
+  seq={segs,i,offset:Math.max(0,t-segs[i].start)};loadSeg();
+}
+function loadSeg(){const s=seq.segs[seq.i];pv.src=`recording/${s.id}.mp4`;
+  pv.onloadedmetadata=()=>{if(seq&&seq.offset){pv.currentTime=Math.min(seq.offset,pv.duration-0.5);seq.offset=0;}pv.play().catch(()=>{});};}
+pv.addEventListener('ended',()=>{if(seq&&seq.i+1<seq.segs.length){seq.i++;loadSeg();}});
+pv.addEventListener('timeupdate',()=>{if(seq)ptime.textContent=new Date((seq.segs[seq.i].start+pv.currentTime)*1000).toLocaleString();});
+
+/* ---------- timeline ---------- */
+let tlHours=24;const tlEl=document.getElementById('tl'),tip=document.getElementById('tltip');
+document.querySelectorAll('.rng button').forEach(b=>b.onclick=()=>{tlHours=+b.dataset.h;
+  document.querySelectorAll('.rng button').forEach(x=>x.classList.toggle('on',x===b));timeline();});
+const hm=t=>new Date(t*1000).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
+async function timeline(){
+  if(player.open)return;
+  const end=Date.now()/1000,start=end-tlHours*3600,pct=t=>((t-start)/(end-start)*100).toFixed(3);
+  const rows=[];
+  for(const id of Object.keys(cameras)){
+    const d=await (await fetch(`api/timeline?camera=${encodeURIComponent(id)}&start=${start}&end=${end}`)).json();
+    const rec=d.recorded.map(([a,b])=>`<i class="rec" style="left:${pct(Math.max(a,start))}%;width:${Math.max(0.15,pct(Math.min(b,end))-pct(Math.max(a,start)))}%"></i>`).join('');
+    const ev=d.events.map(e=>`<b class="ev ${esc(e.label)}" data-id="${esc(e.id)}" data-t="${esc(e.label)} ${hm(e.start)}" style="left:${pct(Math.max(e.start,start))}%;width:${Math.max(0,pct(Math.min(e.end??end,end))-pct(Math.max(e.start,start)))}%"></b>`).join('');
+    rows.push(`<div class="tlrow"><span class="tlname">${esc(cameras[id].name)}</span><div class="tlbar" data-cam="${esc(id)}" data-start="${start}" data-end="${end}">${rec}${ev}<i class="now" style="left:calc(100% - 2px)"></i><i class="hover"></i></div></div>`);
+  }
+  rows.push(`<div class="tlaxis"><span></span><div><span>${hm(start)}</span><span>${hm((start+end)/2)}</span><span>now</span></div></div>`);
+  tlEl.innerHTML=rows.join('');
+}
+const barTime=(bar,x)=>{const b=bar.getBoundingClientRect(),s=+bar.dataset.start,e=+bar.dataset.end;return s+(x-b.left)/b.width*(e-s);};
+tlEl.addEventListener('mousemove',e=>{const bar=e.target.closest('.tlbar');if(!bar){tip.style.display='none';return;}
+  const h=bar.querySelector('.hover'),b=bar.getBoundingClientRect();h.style.display='block';h.style.left=(e.clientX-b.left)+'px';
+  tip.textContent=e.target.dataset.t||new Date(barTime(bar,e.clientX)*1000).toLocaleTimeString();
+  tip.style.display='block';tip.style.left=(e.clientX+12)+'px';tip.style.top=(e.clientY+12)+'px';});
+tlEl.addEventListener('mouseleave',()=>{tip.style.display='none';tlEl.querySelectorAll('.hover').forEach(h=>h.style.display='none');});
+tlEl.addEventListener('click',e=>{const bar=e.target.closest('.tlbar');if(!bar)return;
+  if(e.target.dataset.id)return playClip(e.target.dataset.id,`${cameras[bar.dataset.cam].name} · ${e.target.dataset.t}`);
+  playAt(bar.dataset.cam,barTime(bar,e.clientX));});
+
+loadCameras().then(timeline);setInterval(timeline,15000);
+stats();setInterval(stats,2000);events();setInterval(events,3000);
 </script></body></html>

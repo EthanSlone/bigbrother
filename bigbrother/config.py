@@ -18,6 +18,9 @@ from typing import Any, Mapping
 import yaml
 
 ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# rtsp:// for real cameras; ffmpeg:http(s):// lets go2rtc pull HLS feeds (e.g. public
+# traffic cameras) and re-serve them as RTSP, so the rest of the system is unaffected.
+SOURCE_PREFIXES = ("rtsp://", "rtsps://", "ffmpeg:http://", "ffmpeg:https://")
 CAMERA_ID = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 
 DEFAULT_CONFIG_PATH = Path(os.environ.get("BB_CONFIG", "/config/cameras.yml"))
@@ -89,6 +92,20 @@ def expand_env(value: str, env: Mapping[str, str] | None = None) -> str:
     if missing:
         raise ConfigError(f"Environment variable(s) not set: {', '.join(sorted(set(missing)))}")
     return ENV_REF.sub(lambda m: env[m.group(1)], value)
+
+
+def direct_url(source: str) -> str:
+    """The URL ffprobe/ffmpeg can open directly: drops go2rtc's 'ffmpeg:' prefix and #options."""
+    if source.startswith("ffmpeg:"):
+        return source[len("ffmpeg:"):].split("#", 1)[0]
+    return source
+
+
+def input_args(url: str) -> list[str]:
+    """Demuxer options for ffprobe/ffmpeg; RTSP-only flags break other inputs."""
+    if url.startswith(("rtsp://", "rtsps://")):
+        return ["-rtsp_transport", "tcp", "-timeout", "10000000"]  # 10 s socket timeout (µs)
+    return ["-rw_timeout", "15000000"]
 
 
 def mask_url(url: str) -> str:
@@ -164,8 +181,11 @@ def parse_config(data: Any) -> Config:
         for key, url in streams.items():
             if key not in ("main", "sub"):
                 raise ConfigError(f"{where}.streams: unknown stream '{key}' (use main/sub)")
-            if not isinstance(url, str) or not url.startswith(("rtsp://", "rtsps://")):
-                raise ConfigError(f"{where}.streams.{key} must be an rtsp:// URL")
+            if not isinstance(url, str) or not url.startswith(SOURCE_PREFIXES):
+                raise ConfigError(
+                    f"{where}.streams.{key} must be an rtsp:// URL, or ffmpeg:https://... "
+                    "for an HLS (.m3u8) feed"
+                )
             if re.search(r"://[^:/@]+:(?!\$\{)[^@/]+@", url):
                 raise ConfigError(
                     f"{where}.streams.{key} has a literal password; put it in .env and "

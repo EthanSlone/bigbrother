@@ -13,9 +13,7 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from statistics import mean
 
-from .config import Camera, Config, ConfigError, expand_env, mask_url
-
-RTSP_IN = ["-rtsp_transport", "tcp", "-timeout", "10000000"]  # 10 s socket timeout (µs)
+from .config import Camera, Config, ConfigError, direct_url, expand_env, input_args, mask_url
 
 
 @dataclass
@@ -35,6 +33,9 @@ class StreamReport:
     bitrate_kbps: float | None = None
     audio_codec: str | None = None
     notes: list[str] = field(default_factory=list)
+
+
+NO_SUB = "No substream configured"
 
 
 def _rate(text: str | None) -> float | None:
@@ -92,14 +93,14 @@ def analyze_packets(packets: list[dict]) -> tuple[float | None, float | None, fl
 def probe_stream(cam: Camera, which: str, url_raw: str, seconds: int = 10) -> StreamReport:
     report = StreamReport(camera=cam.id, stream=which, url=mask_url(url_raw))
     try:
-        url = expand_env(url_raw)
+        url = direct_url(expand_env(url_raw))
     except ConfigError as exc:
         report.error = str(exc)
         return report
 
     try:
         meta = _run(
-            ["ffprobe", "-v", "error", *RTSP_IN,
+            ["ffprobe", "-v", "error", *input_args(url),
              "-show_entries",
              "stream=codec_type,codec_name,profile,width,height,avg_frame_rate,r_frame_rate",
              "-of", "json", url],
@@ -123,7 +124,7 @@ def probe_stream(cam: Camera, which: str, url_raw: str, seconds: int = 10) -> St
 
     try:
         pk = _run(
-            ["ffprobe", "-v", "error", *RTSP_IN, "-select_streams", "v:0",
+            ["ffprobe", "-v", "error", *input_args(url), "-select_streams", "v:0",
              "-read_intervals", f"%+{seconds}",
              "-show_entries", "packet=pts_time,dts_time,flags,size",
              "-of", "json", url],
@@ -175,7 +176,7 @@ def probe_all(cfg: Config, seconds: int = 10) -> list[StreamReport]:
         if cam.sub:
             reports.append(probe_stream(cam, "sub", cam.sub, seconds))
         else:
-            r = StreamReport(camera=cam.id, stream="sub", url="-", error="No substream configured")
+            r = StreamReport(camera=cam.id, stream="sub", url="-", error=NO_SUB)
             reports.append(r)
     return reports
 
@@ -190,6 +191,9 @@ def render_markdown(reports: list[StreamReport]) -> str:
         "|---|---|---|---|---|---|---|---|",
     ]
     for r in reports:
+        if r.error == NO_SUB:
+            lines.append(f"| {r.camera} | sub | - | none configured | | | | |")
+            continue
         if not r.ok:
             lines.append(f"| {r.camera} | {r.stream} | **error** | {r.error} | | | | |")
             continue

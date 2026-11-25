@@ -28,7 +28,8 @@ def run(cfg: Config, recordings_root: Path, db_path: Path) -> None:
         signal.signal(sig, lambda *_: stop.set())
 
     index = RecordingIndex(db_path)
-    organizer = Organizer(recordings_root, index)
+    organizer = Organizer(recordings_root, index,
+                          {c.id: c.record.segment_seconds for c in cfg.cameras.values()})
     retention = Retention(cfg, recordings_root, index)
 
     mqtt = None

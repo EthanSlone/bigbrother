@@ -34,6 +34,13 @@ cameras:
     record:
       retention_days: 60  # example per-camera override
 
+  # A public live feed (HLS) also works, e.g. a state DOT traffic camera. Find current
+  # URLs on your state's 511 site; they change. Prefix with ffmpeg: and add #video=copy.
+  # traffic_cam:
+  #   name: I-20 Traffic
+  #   streams:
+  #     main: ffmpeg:https://ITSStreamingBR2.dotd.la.gov/public/shr-cam-030.streams/playlist.m3u8#video=copy
+
   # backyard:
   #   name: Backyard
   #   streams:

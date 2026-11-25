@@ -47,6 +47,38 @@ Cameras ──RTSP──> go2rtc ──restream──> recorder ──> /recordi
    - Copy a clip out to watch it:
      `docker compose cp recorder:/recordings/front_door/2026-11-25/18/15.00.mp4 .`
 
+### Testing without cameras
+
+The `fakecam` service loops video clips as password-protected RTSP cameras, each with a
+main stream and a 640px substream like a real Annke. The rest of the stack can't tell
+them apart from real cameras, and replaying the same clips gives repeatable detection
+results.
+
+1. Put clips (`.mp4`, `.mkv`, `.mov`) in the `testdata` folder. Each clip becomes one
+   camera named after the file. The best clips, in order:
+   - **Your own footage, exported from Frigate**: real people, cars, and the false alarms
+     that bother you (shadows, bugs at night, rain). These become our test set.
+   - **Free stock CCTV clips** (e.g. Mixkit, Coverr). Pick high, fixed-angle shots with
+     people or cars in them.
+2. Generate the fake cameras. If you don't have a `config\cameras.yml` yet, this
+   writes one for you:
+   ```powershell
+   docker compose run --rm tools fakecam
+   docker compose run --rm tools configure
+   docker compose --profile fakecam up -d
+   ```
+3. The fake cameras' UI is at http://localhost:1985, and the main stack's go2rtc is at
+   http://localhost:1984.
+
+To switch to real cameras later, replace the `cameras:` section in `cameras.yml`,
+re-run `configure`, then run `docker compose --profile fakecam down` and
+`docker compose up -d`.
+
+**Public live feeds** (HLS `.m3u8`), such as state DOT traffic cameras, can be added as a
+camera with `main: ffmpeg:https://.../playlist.m3u8#video=copy`. They're useful for
+multi-day soak tests of recording. They're less useful for detection: they show distant
+highway traffic at low resolution. See the example in `cameras.example.yml`.
+
 ### Keep video out of OneDrive
 
 This folder syncs to OneDrive. Recordings and the database live in Docker volumes by
@@ -59,6 +91,8 @@ that way on this PC. On the Proxmox server, set `RECORDINGS_PATH` to a path on t
 |---|---|
 | `docker compose run --rm tools configure` | Validates `cameras.yml`, checks `.env`, writes `config/generated/go2rtc.yaml` (holds no secrets; go2rtc reads them from the environment) |
 | `docker compose run --rm tools probe` | Phase 0 camera report |
+| `docker compose run --rm tools fakecam` | Turns clips in `testdata/` into fake cameras |
+| `docker compose --profile fakecam up -d` | Starts the stack plus the fake cameras |
 | `docker compose up -d` | Starts go2rtc, mosquitto and the recorder |
 | `docker compose restart go2rtc recorder` | Applies camera changes after re-running `configure` |
 

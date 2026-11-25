@@ -66,9 +66,12 @@ def test_end_to_end_segmenting_and_organizing(tmp_path):
         check=True,
     )
     cmd = build_record_cmd(str(src), cache, 10, "h264", False, False)
-    # Swap RTSP-only input flags for a file input in the test.
+    # Swap live-stream input flags for a real-time file input in the test. Wall-clock
+    # timestamps can't be combined with -re on a file (verified live against go2rtc instead).
     i = cmd.index("-rtsp_transport")
     del cmd[i:i + 4]
+    i = cmd.index("-use_wallclock_as_timestamps")
+    del cmd[i:i + 2]
     cmd[cmd.index("-i"):cmd.index("-i")] = ["-re"]
     subprocess.run(cmd, check=True, env={**os.environ, "TZ": "UTC"}, timeout=60)
 

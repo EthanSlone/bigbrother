@@ -26,6 +26,8 @@ log = logging.getLogger(__name__)
 SEGMENT_PATTERN = "%Y%m%dT%H%M%SZ.mp4"  # strftime pattern; parsed back by segments.py
 RTSP_IN = ["-rtsp_transport", "tcp", "-timeout", "10000000"]
 
+LOG_BURST = 5  # ffmpeg stderr lines logged per camera per minute
+
 StateCallback = Callable[[str, str, str], None]  # (camera_id, state, detail)
 
 
@@ -59,7 +61,11 @@ def build_record_cmd(
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
         "-avoid_negative_ts", "make_zero", "-fflags", "+genpts+discardcorrupt",
-        *RTSP_IN, "-i", input_url,
+        *RTSP_IN,
+        # Stamp frames with the wall clock: cameras reboot, go2rtc reconnects and HLS
+        # feeds wrap, and any of those can make source timestamps jump backwards.
+        "-use_wallclock_as_timestamps", "1",
+        "-i", input_url,
         "-map", "0:v:0", "-c:v", "copy",
     ]
     if video_codec == "hevc":
@@ -182,12 +188,24 @@ class CameraRecorder(threading.Thread):
             return None
 
     def _pump_stderr(self, proc: subprocess.Popen) -> None:
+        """Keep the last lines for error reports; log at most LOG_BURST lines per minute."""
         assert proc.stderr is not None
+        window_start, logged, suppressed = time.monotonic(), 0, 0
         for line in proc.stderr:
             line = line.rstrip()
-            if line:
-                self._stderr_tail.append(line)
+            if not line:
+                continue
+            self._stderr_tail.append(line)
+            now = time.monotonic()
+            if now - window_start > 60:
+                if suppressed:
+                    log.warning("[%s] ffmpeg: (%d similar messages suppressed)", self.camera.id, suppressed)
+                window_start, logged, suppressed = now, 0, 0
+            if logged < LOG_BURST:
                 log.warning("[%s] ffmpeg: %s", self.camera.id, line)
+                logged += 1
+            else:
+                suppressed += 1
 
     def _terminate(self) -> None:
         proc = self._proc

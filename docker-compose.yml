@@ -38,7 +38,7 @@ services:
     depends_on: [go2rtc, mosquitto]
     stop_grace_period: 30s    # time for ffmpeg to close its last segment
 
-  # One-off commands: `docker compose run --rm tools configure|probe`
+  # One-off commands: `docker compose run --rm tools configure|probe|fakecam`
   tools:
     build: .
     image: bigbrother:dev
@@ -46,6 +46,20 @@ services:
     env_file: .env
     volumes:
       - ./config:/config
+      - ./testdata:/testdata:ro
+
+  # Fake cameras for testing without real ones: loops clips from testdata/ as
+  # password-protected RTSP cameras. Start with `docker compose --profile fakecam up -d`.
+  fakecam:
+    image: alexxit/go2rtc:1.9.14
+    profiles: ["fakecam"]
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./config/generated/fakecam:/config
+      - ./testdata:/testdata:ro
+    ports:
+      - "127.0.0.1:1985:1984"   # fake cameras' web UI, for checking clips play
 
 volumes:
   recordings:

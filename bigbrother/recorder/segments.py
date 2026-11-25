@@ -81,9 +81,10 @@ def completed_segments(cache_dir: Path, now: float | None = None) -> list[Path]:
 
 
 class Organizer:
-    def __init__(self, root: Path, index: RecordingIndex):
+    def __init__(self, root: Path, index: RecordingIndex, segment_seconds: dict[str, int] | None = None):
         self.root = root
         self.index = index
+        self.segment_seconds = segment_seconds or {}
 
     def cache_dir(self, camera: str) -> Path:
         return self.root / ".cache" / camera
@@ -111,6 +112,14 @@ class Organizer:
                             camera, src.name, size, failed)
                 os.replace(src, failed / src.name)
             return False
+
+        # A segment can only overrun its target length by about one keyframe interval.
+        # Anything longer means broken source timestamps; trust the clock instead.
+        limit = self.segment_seconds.get(camera, 60) + 30
+        if duration > limit:
+            log.warning("[%s] %s reports %.0fs (expected <= %ds); indexing as %ds",
+                        camera, src.name, duration, limit, limit)
+            duration = float(limit)
 
         rel = dest_relpath(camera, start)
         dest = self.root / rel

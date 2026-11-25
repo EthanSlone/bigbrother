@@ -2,6 +2,7 @@
 
     python -m bigbrother configure   validate cameras.yml, check .env, write go2rtc.yaml
     python -m bigbrother probe       report codec/resolution/fps/keyframes for every stream
+    python -m bigbrother fakecam     turn clips in testdata/ into fake RTSP cameras
     python -m bigbrother recorder    run the recording service
 """
 
@@ -36,7 +37,7 @@ def _configure(args) -> int:
 
 
 def _probe(args) -> int:
-    from .probe import probe_all, render_markdown, reports_json
+    from .probe import NO_SUB, probe_all, render_markdown, reports_json
 
     cfg = load_config(args.config)
     print(f"Probing {len(cfg.cameras)} camera(s), ~{args.seconds}s per stream...\n", flush=True)
@@ -48,7 +49,30 @@ def _probe(args) -> int:
     (out / "probe-report.md").write_text("# Camera probe report\n\n" + md, encoding="utf-8")
     (out / "probe-report.json").write_text(reports_json(reports), encoding="utf-8")
     print(f"Saved {out / 'probe-report.md'}")
-    return 0 if all(r.ok for r in reports if r.error != "No substream configured") else 2
+    return 0 if all(r.ok for r in reports if r.error != NO_SUB) else 2
+
+
+def _fakecam(args) -> int:
+    from .fakecam import cameras_yaml, write_fakecam
+
+    testdata, config_dir = Path(args.testdata), Path(args.config).parent
+    videos, cfg_path, cams_path = write_fakecam(testdata, config_dir)
+    if not videos:
+        print(f"No video files found in {testdata}. Put .mp4/.mkv/.mov clips in testdata/ first.")
+        return 1
+    print(f"{len(videos)} fake camera(s):")
+    for cid, p in videos.items():
+        print(f"  - {cid:<20} <- {p.name}")
+    print(f"Wrote {cfg_path}")
+    if cams_path:
+        print(f"Wrote {cams_path} pointing at the fake cameras.")
+    else:
+        print(f"\n{config_dir / 'cameras.yml'} already exists, so it was left alone. "
+              "To use the fake cameras, replace its cameras: section with:\n")
+        print(cameras_yaml(videos))
+    print("Next: docker compose run --rm tools configure, then "
+          "docker compose --profile fakecam up -d")
+    return 0
 
 
 def _recorder(args) -> int:
@@ -76,6 +100,10 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--seconds", type=int, default=10)
     pr.add_argument("--out", default="/config/generated")
     pr.set_defaults(func=_probe)
+
+    f = sub.add_parser("fakecam", help="turn video files in testdata/ into fake RTSP cameras")
+    f.add_argument("--testdata", default="/testdata")
+    f.set_defaults(func=_fakecam)
 
     r = sub.add_parser("recorder", help="run the recording service")
     r.add_argument("--recordings", default="/recordings")

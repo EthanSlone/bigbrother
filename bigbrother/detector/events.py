@@ -114,6 +114,7 @@ class EventManager:
             id=eid, camera=self.camera, label=t.label, start_ts=t.first_ts, end_ts=None,
             top_score=t.top_score, median_score=t.median_score, box=list(t.box),
             frame_w=w, frame_h=h, stationary=t.stationary, snapshot=None, updated_ts=ts,
+            zones=list(t.zones_visited),
         )
         st.best_quality = snapshot_quality(t, w, h)
         self._write_snapshot(st, frame, ts)
@@ -127,8 +128,9 @@ class EventManager:
     def _ongoing(self, t: Track, st: _State, frame: np.ndarray, w: int, h: int, ts: float) -> None:
         e = st.event
         assert e is not None
-        changed = t.label != e.label or t.stationary != e.stationary
+        changed = t.label != e.label or t.stationary != e.stationary or t.zones_visited != e.zones
         e.label, e.stationary = t.label, t.stationary
+        e.zones = list(t.zones_visited)
         e.top_score, e.median_score = t.top_score, t.median_score
         e.updated_ts = ts
 

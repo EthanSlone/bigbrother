@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 SCHEMA = """
@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS events (
     frame_h       INTEGER NOT NULL,
     stationary    INTEGER NOT NULL DEFAULT 0,
     snapshot      TEXT,              -- path relative to the data dir
-    updated_ts    REAL NOT NULL
+    updated_ts    REAL NOT NULL,
+    zones         TEXT NOT NULL DEFAULT '[]'  -- JSON list of zones entered, in order
 );
 CREATE INDEX IF NOT EXISTS idx_events_camera_start ON events(camera, start_ts);
 CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_ts);
@@ -44,6 +45,7 @@ class Event:
     stationary: bool
     snapshot: str | None
     updated_ts: float
+    zones: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -61,15 +63,22 @@ class EventStore:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {r[1] for r in self._db.execute("PRAGMA table_info(events)")}
+        if "zones" not in cols:  # databases created before zones existed
+            self._db.execute("ALTER TABLE events ADD COLUMN zones TEXT NOT NULL DEFAULT '[]'")
 
     def save(self, e: Event) -> None:
         with self._lock:
             self._db.execute(
                 "INSERT OR REPLACE INTO events (id, camera, label, start_ts, end_ts, top_score, "
-                "median_score, box, frame_w, frame_h, stationary, snapshot, updated_ts) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "median_score, box, frame_w, frame_h, stationary, snapshot, updated_ts, zones) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (e.id, e.camera, e.label, e.start_ts, e.end_ts, e.top_score, e.median_score,
-                 json.dumps(e.box), e.frame_w, e.frame_h, int(e.stationary), e.snapshot, e.updated_ts),
+                 json.dumps(e.box), e.frame_w, e.frame_h, int(e.stationary), e.snapshot, e.updated_ts,
+                 json.dumps(e.zones)),
             )
 
     def close_open(self, now: float) -> int:
@@ -103,6 +112,7 @@ class EventStore:
     @staticmethod
     def _row(r: dict) -> Event:
         r["box"] = json.loads(r["box"])
+        r["zones"] = json.loads(r.get("zones") or "[]")
         r["stationary"] = bool(r["stationary"])
         return Event(**r)
 

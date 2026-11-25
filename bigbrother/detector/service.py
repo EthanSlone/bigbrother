@@ -22,6 +22,7 @@ from .model_store import resolve_model
 from .models import InferencePool, load_model, plan_threads
 from .motion import MotionDetector, MotionResult
 from .tracker import Track, Tracker
+from ..zones import ground_point, in_any, update_zones
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class CameraWorker(threading.Thread):
         self.source = FrameSource(cam.id, url, decode_fps, s.width)
         self._every = max(1, round(decode_fps / s.fps))
         self._next_seq = 0
-        self.motion = MotionDetector()
+        self.motion = MotionDetector(masks=cam.motion_masks)
         self.tracker = Tracker()
         self.events = EventManager(cam.id, s, store, data_dir, publish)
         self.model = model
@@ -96,9 +97,16 @@ class CameraWorker(threading.Thread):
             t0 = time.perf_counter()
             dets = self.model.detect(img, s.min_score, set(s.labels))
             self._infer_ms.append((time.perf_counter() - t0) * 1000)
+            h, w = img.shape[:2]
+            if self.cam.object_masks:
+                dets = [d for d in dets if not in_any(ground_point(d.box, w, h), self.cam.object_masks)]
             self._detect_ts.append(ts)
             self._last_check = ts
             ended = self.tracker.update(dets, ts)
+            if self.cam.zones:
+                for t in self.tracker.tracks:
+                    if t.misses == 0:
+                        update_zones(t, self.cam.zones, w, h)
             self.events.process(self.tracker.tracks, ended, img, ts)
         self.view = ViewState(ts=ts, tracks=[self._track_view(t) for t in self.tracker.tracks],
                               motion=m.boxes)
@@ -107,7 +115,8 @@ class CameraWorker(threading.Thread):
         st = self.events._states.get(t.id)
         return {"id": t.id, "label": t.label, "score": round(t.last_det_score, 2),
                 "box": list(t.box), "velocity": list(t.velocity), "seen_ts": t.last_ts,
-                "stationary": t.stationary, "confirmed": bool(st and st.event), "missed": t.misses > 0}
+                "stationary": t.stationary, "confirmed": bool(st and st.event), "missed": t.misses > 0,
+                "zones": sorted(t.zones)}
 
     def stats(self) -> dict:
         def rate(q: deque) -> float:

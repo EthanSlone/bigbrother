@@ -49,6 +49,16 @@ cameras:
       sub: rtsp://${CAM_USER}:${CAM_PASSWORD}@192.168.1.102:554/Streaming/Channels/102
     record:
       retention_days: 60  # example per-camera override
+    # Zones and masks use fractions of the frame (0..1). Easiest way to make them: the
+    # "Zones & masks" button in the debug viewer (http://localhost:5050), which writes this for you.
+    zones:
+      driveway:
+        points: [[0.2, 0.45], [0.8, 0.45], [1.0, 1.0], [0.0, 1.0]]
+        objects: [person, car]   # optional: only these objects count in this zone
+    masks:
+      motion:                    # ignore movement here (trees, the camera's timestamp)
+        - [[0.0, 0.0], [0.4, 0.0], [0.4, 0.06], [0.0, 0.06]]
+      objects: []                # drop detections whose ground point is in here
 
   # A public live feed (HLS) also works, e.g. a state DOT traffic camera. Find current
   # URLs on your state's 511 site; they change. Prefix with ffmpeg: and add #video=copy.

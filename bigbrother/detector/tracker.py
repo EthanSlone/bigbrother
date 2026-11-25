@@ -67,6 +67,9 @@ class Track:
     stationary: bool = False
     anchor: tuple[float, float] | None = None  # where it settled when it became stationary
     last_det_score: float = 0.0
+    zones: set = field(default_factory=set)             # zones it is in right now
+    zones_visited: list = field(default_factory=list)   # every zone it has entered, in order
+    zone_streak: dict = field(default_factory=dict)
 
     @property
     def label(self) -> str:

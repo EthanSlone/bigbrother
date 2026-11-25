@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BigBrother · detector debug</title>
+<style>
+:root{--bg:#111418;--panel:#1a1f25;--panel2:#20262d;--line:#2a313a;--text:#e6e8eb;--dim:#8b949e;--ok:#50c850;--warn:#e6c828;--bad:#dc3c3c;--blue:#3ca0e6;--orange:#ff8c00}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;background:var(--bg);color:var(--text)}
+header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}
+h1{font-size:16px;margin:0}header span{color:var(--dim);font-size:12px}h2{font-size:14px;margin:0 0 8px}
+main{padding:16px 20px;display:grid;gap:20px}
+.cams{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:14px}
+.cam{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.cam img{width:100%;display:block;background:#000;aspect-ratio:16/9;object-fit:contain}
+.meta{padding:8px 10px;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;color:var(--dim);align-items:center}
+.meta b{color:var(--text);font-weight:600}.state-running{color:var(--ok)}.state-error{color:var(--bad)}
+.meta button{margin-left:auto}
+.err{color:var(--bad);font-size:12px;padding:0 10px 8px}
+.legend{font-size:12px;color:var(--dim);display:flex;gap:14px;flex-wrap:wrap}.sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;font-size:13px;vertical-align:middle}
+th{color:var(--dim);font-weight:500;font-size:12px}td img{height:54px;border-radius:4px;cursor:zoom-in;display:block}
+.tag{font-size:11px;padding:1px 6px;border-radius:9px;background:#2a313a;color:var(--dim);white-space:nowrap}.live{background:#1f3a24;color:var(--ok)}.zone{background:#1d3347;color:var(--blue)}
+button{font:inherit;font-size:12px;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer}
+button:hover{border-color:#3d4752}button.primary{background:#1d3347;border-color:#2c5578;color:#cfe6ff}
+dialog{border:1px solid var(--line);border-radius:10px;padding:0;background:var(--panel);color:var(--text);max-width:96vw}
+dialog::backdrop{background:rgba(0,0,0,.6)}
+#dlg{background:#000;border:0}#dlg img{max-width:95vw;max-height:90vh;display:block}
+#zed .wrap{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:0;width:min(1400px,96vw)}
+#zed .stage{position:relative;background:#000;align-self:start}#zed .stage img{width:100%;display:block}
+#zed svg{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair}
+#zed .side{padding:14px;border-left:1px solid var(--line);display:flex;flex-direction:column;gap:12px;max-height:90vh;overflow:auto}
+#zed label{font-size:12px;color:var(--dim);display:block;margin-bottom:4px}
+#zed input[type=text]{width:100%;font:inherit;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+#zed .kinds{display:flex;gap:6px}#zed .kinds button.on{background:#1d3347;border-color:#2c5578}
+#zed .row{display:flex;gap:6px;flex-wrap:wrap}
+#zed ul{list-style:none;margin:0;padding:0;font-size:12px}#zed li{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--line)}
+#zed textarea{width:100%;height:190px;font:12px/1.4 ui-monospace,Consolas,monospace;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px}
+#zed .hint{font-size:12px;color:var(--dim)}
+</style></head><body>
+<header><h1>BigBrother detector</h1><span>debug viewer: not the real app</span>
+<div class="legend"><span><i class="sw" style="background:var(--ok)"></i>event</span><span><i class="sw" style="background:var(--warn)"></i>tracking (unconfirmed)</span><span><i class="sw" style="background:#969696"></i>stationary</span><span><i class="sw" style="background:var(--bad)"></i>motion</span><span><i class="sw" style="background:var(--blue)"></i>zone</span><span><i class="sw" style="background:#555"></i>motion mask</span><span><i class="sw" style="background:var(--orange)"></i>object mask</span></div></header>
+<main><section class="cams" id="cams"></section>
+<section><h2>Recent events</h2>
+<table><thead><tr><th>Snapshot</th><th>Camera</th><th>Object</th><th>Score</th><th>Zones</th><th>Started</th><th>Duration</th><th></th></tr></thead><tbody id="events"></tbody></table></section></main>
+
+<dialog id="dlg" onclick="this.close()"><img id="big" alt=""></dialog>
+
+<dialog id="zed"><div class="wrap">
+  <div class="stage"><img id="zimg" alt=""><svg id="zsvg" viewBox="0 0 1000 1000" preserveAspectRatio="none"></svg></div>
+  <div class="side">
+    <div><h2 id="ztitle">Zones</h2><div class="hint">Click on the image to add points. Finish a shape with 3+ points.</div></div>
+    <div><label>Drawing</label><div class="kinds">
+      <button data-kind="zone" class="on">Zone</button><button data-kind="motion">Motion mask</button><button data-kind="objects">Object mask</button></div></div>
+    <div id="zopts"><label>Zone name (lowercase, e.g. porch)</label><input type="text" id="zname" placeholder="porch">
+      <label style="margin-top:8px">Only these objects (optional, comma-separated)</label><input type="text" id="zobjs" placeholder="person, car"></div>
+    <div class="row"><button id="zundo">Undo point</button><button id="zclear">Clear</button><button id="zdone" class="primary">Finish shape</button></div>
+    <div><label>Shapes</label><ul id="zlist"></ul></div>
+    <div><label>Paste this under the camera in config/cameras.yml, then run<br><code>docker compose restart detector</code></label>
+      <textarea id="zyaml" readonly></textarea>
+      <div class="row" style="margin-top:6px"><button id="zcopy" class="primary">Copy</button><button id="zclose">Close</button></div></div>
+  </div></div></dialog>
+
+<script>
+const camsEl=document.getElementById('cams'),evEl=document.getElementById('events');
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const loops={},viewFps={},sleep=ms=>new Promise(r=>setTimeout(r,ms));
+let cameras={};
+
+async function loadCameras(){for(const c of await (await fetch('api/cameras')).json())cameras[c.id]=c;}
+
+async function stats(){
+  const s=await (await fetch('api/stats')).json();
+  for(const c of s){
+    let el=document.getElementById('cam-'+c.camera);
+    if(!el){el=document.createElement('div');el.className='cam';el.id='cam-'+c.camera;
+      el.innerHTML=`<img alt="${esc(c.name)}"><div class="meta"></div><div class="err"></div>`;camsEl.appendChild(el);}
+    el.querySelector('.meta').innerHTML=`<b>${esc(c.name)}</b><span class="state-${esc(c.state)}">${esc(c.state)}</span>`+
+      `<span>preview <b>${(viewFps[c.camera]||0).toFixed(1)}</b> fps</span><span>analysed <b>${c.fps_analysed}</b></span><span>detect <b>${c.detect_fps}</b> fps</span><span>model <b>${c.infer_ms??'-'}</b> ms</span>`+
+      `<span>events <b>${c.events_started}</b></span><span>filtered <b>${c.filtered}</b></span><span>skipped <b>${c.skipped_frames}</b></span>`+
+      `<button onclick="openEditor('${esc(c.camera)}')">Zones &amp; masks</button>`;
+    el.querySelector('.err').textContent=c.error||'';
+    if(!loops[c.camera]){loops[c.camera]=true;liveLoop(c.camera,el.querySelector('img'));}
+  }
+}
+
+async function liveLoop(id,img){
+  let seq=0,shown=[];
+  for(;;){
+    if(document.hidden){await sleep(500);continue;}
+    try{
+      const r=await fetch(`live/${id}.jpg?after=${seq}`,{cache:'no-store'});
+      if(r.status!==200){await sleep(r.status===204?50:1000);continue;}
+      seq=+r.headers.get('X-Seq')||0;
+      const url=URL.createObjectURL(await r.blob()),old=img.src;
+      await new Promise(res=>{img.onload=img.onerror=res;img.src=url;});
+      if(old.startsWith('blob:'))URL.revokeObjectURL(old);
+      const now=performance.now();shown.push(now);shown=shown.filter(t=>now-t<2000);
+      viewFps[id]=shown.length/2;
+    }catch(e){await sleep(1000);}
+  }
+}
+
+const fmtDur=(a,b)=>{const s=Math.round(((b??Date.now()/1000))-a);return s<60?s+'s':Math.floor(s/60)+'m '+(s%60)+'s'};
+async function events(){
+  const ev=await (await fetch('api/events?limit=40')).json();
+  evEl.innerHTML=ev.map(e=>`<tr><td>${e.snapshot?`<img src="snapshot/${esc(e.id)}.jpg?u=${e.updated_ts}">`:''}</td>`+
+   `<td>${esc(e.camera)}</td><td>${esc(e.label)}</td><td>${e.median_score.toFixed(2)} / ${e.top_score.toFixed(2)}</td>`+
+   `<td>${(e.zones||[]).map(z=>`<span class="tag zone">${esc(z)}</span>`).join(' ')}</td>`+
+   `<td>${new Date(e.start_ts*1000).toLocaleTimeString()}</td><td>${fmtDur(e.start_ts,e.end_ts)}</td>`+
+   `<td>${e.end_ts?'':'<span class="tag live">in view</span>'} ${e.stationary?'<span class="tag">stationary</span>':''}</td></tr>`).join('');
+}
+evEl.addEventListener('click',e=>{if(e.target.tagName==='IMG'){document.getElementById('big').src=e.target.src;document.getElementById('dlg').showModal();}});
+
+/* ---------- zone & mask editor ---------- */
+const zed=document.getElementById('zed'),zsvg=document.getElementById('zsvg');
+let ed=null; // {cam, zones:{name:{points,objects}}, motion:[poly], objects:[poly], kind, pts:[]}
+const r3=v=>Math.round(v*1000)/1000;
+
+async function openEditor(id){
+  await loadCameras();
+  const c=cameras[id];
+  ed={cam:id,zones:JSON.parse(JSON.stringify(c.zones||{})),motion:JSON.parse(JSON.stringify(c.motion_masks||[])),
+      objects:JSON.parse(JSON.stringify(c.object_masks||[])),kind:'zone',pts:[]};
+  document.getElementById('ztitle').textContent=`Zones & masks: ${c.name}`;
+  const r=await fetch(`live/${id}.jpg?raw=1&after=0`,{cache:'no-store'});
+  if(r.status===200)document.getElementById('zimg').src=URL.createObjectURL(await r.blob());
+  setKind('zone');redraw();zed.showModal();
+}
+function setKind(k){ed.kind=k;document.querySelectorAll('#zed .kinds button').forEach(b=>b.classList.toggle('on',b.dataset.kind===k));
+  document.getElementById('zopts').style.display=k==='zone'?'':'none';}
+document.querySelectorAll('#zed .kinds button').forEach(b=>b.onclick=()=>setKind(b.dataset.kind));
+zsvg.addEventListener('click',e=>{const b=zsvg.getBoundingClientRect();
+  ed.pts.push([r3((e.clientX-b.left)/b.width),r3((e.clientY-b.top)/b.height)]);redraw();});
+document.getElementById('zundo').onclick=()=>{ed.pts.pop();redraw();};
+document.getElementById('zclear').onclick=()=>{ed.pts=[];redraw();};
+document.getElementById('zdone').onclick=()=>{
+  if(ed.pts.length<3){alertBox('A shape needs at least 3 points.');return;}
+  if(ed.kind==='zone'){
+    const name=document.getElementById('zname').value.trim().toLowerCase();
+    if(!/^[a-z][a-z0-9_]{0,31}$/.test(name)){alertBox('Zone name: lowercase letters, digits and _ (start with a letter).');return;}
+    const objs=document.getElementById('zobjs').value.split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
+    ed.zones[name]={points:ed.pts,objects:objs.length?objs:null};
+    document.getElementById('zname').value='';
+  } else ed[ed.kind].push(ed.pts);
+  ed.pts=[];redraw();};
+document.getElementById('zclose').onclick=()=>zed.close();
+document.getElementById('zcopy').onclick=async()=>{const t=document.getElementById('zyaml');
+  try{await navigator.clipboard.writeText(t.value);}catch(e){t.select();document.execCommand('copy');}
+  document.getElementById('zcopy').textContent='Copied';setTimeout(()=>document.getElementById('zcopy').textContent='Copy',1500);};
+function alertBox(msg){document.querySelector('#zed .hint').textContent=msg;document.querySelector('#zed .hint').style.color='var(--bad)';
+  setTimeout(()=>{const h=document.querySelector('#zed .hint');h.textContent='Click on the image to add points. Finish a shape with 3+ points.';h.style.color='';},3000);}
+function del(kind,key){if(kind==='zone')delete ed.zones[key];else ed[kind].splice(key,1);redraw();}
+
+function poly(points,stroke,fill,label){
+  const p=points.map(([x,y])=>`${x*1000},${y*1000}`).join(' ');
+  let s=`<polygon points="${p}" fill="${fill}" stroke="${stroke}" stroke-width="3" vector-effect="non-scaling-stroke"/>`;
+  if(label){const [x,y]=points[0];s+=`<text x="${x*1000+6}" y="${y*1000+28}" fill="${stroke}" font-size="26" font-family="system-ui">${esc(label)}</text>`;}
+  return s;}
+function redraw(){
+  let s='';
+  for(const m of ed.motion)s+=poly(m,'#888','rgba(20,20,20,.55)');
+  for(const m of ed.objects)s+=poly(m,'#ff8c00','rgba(255,140,0,.3)');
+  for(const [n,z] of Object.entries(ed.zones))s+=poly(z.points,'#3ca0e6','rgba(60,160,230,.12)',n);
+  if(ed.pts.length){
+    const col=ed.kind==='zone'?'#3ca0e6':ed.kind==='motion'?'#bbb':'#ff8c00';
+    s+=`<polyline points="${ed.pts.map(([x,y])=>`${x*1000},${y*1000}`).join(' ')}" fill="none" stroke="${col}" stroke-width="3" stroke-dasharray="8 6" vector-effect="non-scaling-stroke"/>`;
+    for(const [x,y] of ed.pts)s+=`<circle cx="${x*1000}" cy="${y*1000}" r="7" fill="${col}"/>`;
+  }
+  zsvg.innerHTML=s;
+  const li=[];
+  for(const n of Object.keys(ed.zones))li.push(`<li><span><span class="tag zone">zone</span> ${esc(n)}${ed.zones[n].objects?` (${esc(ed.zones[n].objects.join(', '))})`:''}</span><button onclick="del('zone','${esc(n)}')">Delete</button></li>`);
+  ed.motion.forEach((_,i)=>li.push(`<li><span><span class="tag">motion mask</span> #${i+1}</span><button onclick="del('motion',${i})">Delete</button></li>`));
+  ed.objects.forEach((_,i)=>li.push(`<li><span><span class="tag">object mask</span> #${i+1}</span><button onclick="del('objects',${i})">Delete</button></li>`));
+  document.getElementById('zlist').innerHTML=li.join('')||'<li><span style="color:var(--dim)">None yet</span></li>';
+  document.getElementById('zyaml').value=toYaml();
+}
+function toYaml(){
+  const pl=pts=>'['+pts.map(([x,y])=>`[${x}, ${y}]`).join(', ')+']';
+  const out=[`  ${ed.cam}:`,`    # ...keep the camera's name/streams/etc. and replace any existing zones/masks with:`];
+  const zn=Object.entries(ed.zones);
+  if(zn.length){out.push('    zones:');for(const [n,z] of zn){out.push(`      ${n}:`,`        points: ${pl(z.points)}`);if(z.objects)out.push(`        objects: [${z.objects.join(', ')}]`);}}
+  if(ed.motion.length||ed.objects.length){out.push('    masks:');
+    if(ed.motion.length){out.push('      motion:');for(const m of ed.motion)out.push(`        - ${pl(m)}`);}
+    if(ed.objects.length){out.push('      objects:');for(const m of ed.objects)out.push(`        - ${pl(m)}`);}}
+  if(out.length===2)out.push('    # (no zones or masks)');
+  return out.join('\n')+'\n';
+}
+
+loadCameras();stats();setInterval(stats,2000);events();setInterval(events,3000);
+</script></body></html>

@@ -28,12 +28,14 @@ class MotionResult:
 
 class MotionDetector:
     def __init__(self, threshold: int = 25, min_area: float = 0.0008, learn_rate: float = 0.05,
-                 lighting_fraction: float = 0.5):
+                 lighting_fraction: float = 0.5, masks=()):
         self.threshold = threshold          # pixel difference (0-255) that counts as change
         self.min_area = min_area            # smallest moving blob, as a fraction of the frame
         self.learn_rate = learn_rate        # how fast the background adapts
         self.lighting_fraction = lighting_fraction
         self._bg: np.ndarray | None = None
+        self.masks = tuple(masks)            # normalized polygons where motion is ignored
+        self._keep: np.ndarray | None = None  # 1 = count motion here, 0 = masked
         self._kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
     def update(self, frame: np.ndarray) -> MotionResult:
@@ -48,6 +50,14 @@ class MotionDetector:
 
         diff = cv2.absdiff(gray, self._bg)
         mask = (diff > self.threshold).astype(np.uint8) * 255
+        if self.masks:
+            if self._keep is None or self._keep.shape != mask.shape:
+                self._keep = np.ones_like(mask)
+                mh, mw = mask.shape
+                for poly in self.masks:
+                    pts = np.array([[x * mw, y * mh] for x, y in poly], np.int32)
+                    cv2.fillPoly(self._keep, [pts], 0)
+            mask *= self._keep
         mask = cv2.dilate(mask, self._kernel, iterations=2)
         fraction = float(np.count_nonzero(mask)) / mask.size
 

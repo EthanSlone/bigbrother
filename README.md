@@ -69,6 +69,23 @@ with snapshots. Click a snapshot to enlarge it.
 The detection model (~36 MB) downloads automatically on first start. It's verified by
 checksum and cached in a Docker volume.
 
+### Zones and masks
+
+Click **Zones & masks** under a camera in the debug viewer, then click points on the
+image to draw shapes:
+- **Zone:** a named area like `porch` or `driveway`. You can limit a zone to certain
+  objects. An object enters a zone when its ground point (bottom-centre of its box) is
+  inside the zone on 2 checks in a row. Events record every zone they entered, and alert
+  rules can require one.
+- **Motion mask:** movement here is ignored. Use it for trees, flags and the camera's
+  timestamp overlay.
+- **Object mask:** detections whose ground point falls here are dropped, e.g. a statue
+  that looks like a person.
+
+The editor generates the YAML. Paste it under the camera in `config/cameras.yml`, then
+run `docker compose restart detector`. Coordinates are fractions of the frame, so they
+fit any resolution.
+
 ### Testing without cameras
 
 The `fakecam` service loops video clips as password-protected RTSP cameras, each with a

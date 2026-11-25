@@ -17,6 +17,8 @@ from typing import Any, Mapping
 
 import yaml
 
+from .zones import ZONE_NAME, Polygon, Zone, ZoneConfigError, parse_polygon
+
 ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # rtsp:// for real cameras; ffmpeg:http(s):// lets go2rtc pull HLS feeds (e.g. public
 # traffic cameras) and re-serve them as RTSP, so the rest of the system is unaffected.
@@ -72,6 +74,9 @@ class Camera:
     sub: str | None
     record: RecordSettings
     detect: DetectSettings = field(default_factory=DetectSettings)
+    zones: dict[str, Zone] = field(default_factory=dict)
+    motion_masks: tuple[Polygon, ...] = ()
+    object_masks: tuple[Polygon, ...] = ()
 
     @property
     def main_stream(self) -> str:
@@ -227,6 +232,49 @@ def _detector_settings(raw: Any) -> DetectorSettings:
     )
 
 
+def _zones(raw: Any, where: str) -> dict[str, Zone]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a mapping of zone name -> settings")
+    zones = {}
+    for name, z in raw.items():
+        zw = f"{where}.{name}"
+        if not isinstance(name, str) or not ZONE_NAME.match(name):
+            raise ConfigError(f"{zw}: zone names must be lowercase letters, digits and underscores")
+        if not isinstance(z, dict) or "points" not in z:
+            raise ConfigError(f"{zw} needs points: [[x, y], ...]")
+        unknown = set(z) - {"points", "objects"}
+        if unknown:
+            raise ConfigError(f"{zw}: unknown key(s) {sorted(unknown)}")
+        objects = z.get("objects")
+        if objects is not None and (not isinstance(objects, list) or not all(isinstance(o, str) for o in objects)):
+            raise ConfigError(f"{zw}.objects must be a list of object names")
+        try:
+            zones[name] = Zone(name, parse_polygon(z["points"], f"{zw}.points"),
+                               tuple(objects) if objects else None)
+        except ZoneConfigError as exc:
+            raise ConfigError(str(exc)) from exc
+    return zones
+
+
+def _masks(raw: Any, where: str) -> tuple[tuple[Polygon, ...], tuple[Polygon, ...]]:
+    if raw is None:
+        return (), ()
+    if not isinstance(raw, dict) or set(raw) - {"motion", "objects"}:
+        raise ConfigError(f"{where} must have 'motion' and/or 'objects' lists of polygons")
+    out = []
+    for kind in ("motion", "objects"):
+        polys = raw.get(kind) or []
+        if not isinstance(polys, list):
+            raise ConfigError(f"{where}.{kind} must be a list of polygons")
+        try:
+            out.append(tuple(parse_polygon(p, f"{where}.{kind}[{i}]") for i, p in enumerate(polys)))
+        except ZoneConfigError as exc:
+            raise ConfigError(str(exc)) from exc
+    return out[0], out[1]
+
+
 def parse_config(data: Any) -> Config:
     if not isinstance(data, dict):
         raise ConfigError("cameras.yml must be a mapping at the top level")
@@ -279,6 +327,7 @@ def parse_config(data: Any) -> Config:
                     f"{where}.streams.{key} has a literal password; put it in .env and "
                     "reference it as ${VAR}"
                 )
+        masks = _masks(raw.get("masks"), f"{where}.masks")
         cameras[cam_id] = Camera(
             id=cam_id,
             name=str(raw.get("name") or cam_id.replace("_", " ").title()),
@@ -286,6 +335,9 @@ def parse_config(data: Any) -> Config:
             sub=streams.get("sub"),
             record=_record_settings(raw.get("record"), base_record, f"{where}.record"),
             detect=_detect_settings(raw.get("detect"), base_detect, f"{where}.detect"),
+            zones=_zones(raw.get("zones"), f"{where}.zones"),
+            motion_masks=masks[0],
+            object_masks=masks[1],
         )
 
     mqtt = data.get("mqtt") or {}

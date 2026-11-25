@@ -6,6 +6,7 @@
     python -m bigbrother recorder    run the recording service
     python -m bigbrother detector    run the detection service (+ debug viewer)
     python -m bigbrother models      download/verify built-in detection models
+    python -m bigbrother evaluate    run clips through detection offline and count events
 """
 
 from __future__ import annotations
@@ -85,6 +86,22 @@ def _detector(args) -> int:
     return 0
 
 
+def _evaluate(args) -> int:
+    from .config import DetectSettings
+    from .detector.evaluate import evaluate_clip
+    from .detector.model_store import resolve_model
+    from .detector.models import load_model, plan_threads
+
+    path, family = resolve_model(args.model)
+    _, threads = plan_threads(1, 0)
+    model = load_model(family or "yolox", path, args.backend, "", threads)
+    for clip in args.clips:
+        for fps in args.fps:
+            r = evaluate_clip(Path(clip), model, fps=fps, settings=DetectSettings(fps=fps))
+            print(r.summary(), flush=True)
+    return 0
+
+
 def _models(args) -> int:
     from .detector.model_store import BUILTIN, resolve_model
 
@@ -133,6 +150,13 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--db", default="/data/bigbrother.db")
     d.add_argument("--viewer-port", type=int, default=5050, help="debug viewer port (0 = off)")
     d.set_defaults(func=_detector)
+
+    ev = sub.add_parser("evaluate", help="run clips through detection and count events")
+    ev.add_argument("clips", nargs="+")
+    ev.add_argument("--fps", type=float, nargs="+", default=[5.0])
+    ev.add_argument("--model", default="yolox_s")
+    ev.add_argument("--backend", default="openvino")
+    ev.set_defaults(func=_evaluate)
 
     mo = sub.add_parser("models", help="download built-in detection models")
     mo.add_argument("names", nargs="*")

@@ -1,8 +1,10 @@
 """Turns tracks into events: confirm, snapshot, publish, end.
 
-A track only becomes an event once it has been seen on enough frames with a
-high enough median score. One confident-looking frame of a shadow is not an
-event. Tracks that end before confirmation are counted as "filtered" so we
+A track only becomes an event once it has been seen for long enough with a
+high enough median score: `min_frames` detections, or at least two detections
+spanning the time `min_frames` would take at the configured fps (so a slow
+machine running the model less often still confirms real objects). One
+confident-looking frame of a shadow is never an event. Tracks that end before confirmation are counted as "filtered" so we
 can see how many false positives the confirmation step removes.
 """
 
@@ -72,7 +74,7 @@ class EventManager:
         for t in tracks:
             st = self._states.setdefault(t.id, _State())
             if st.event is None:
-                if t.hits >= self.settings.min_frames and t.median_score >= self.settings.threshold:
+                if self._confirmed(t):
                     self._start(t, st, frame, w, h, ts)
                 continue
             self._ongoing(t, st, frame, w, h, ts)
@@ -93,6 +95,17 @@ class EventManager:
                 self.store.save(st.event)
                 self.publish("events", {"type": "end", "event": st.event.to_dict()}, False)
         self._states.clear()
+
+    def _confirmed(self, t: Track) -> bool:
+        """Seen long enough, and either consistently confident or at least once very confident."""
+        s = self.settings
+        if t.hits < 2:
+            return False
+        seen_long_enough = t.hits >= s.min_frames or (t.last_ts - t.first_ts) >= (s.min_frames - 1) / s.fps
+        if not seen_long_enough:
+            return False
+        return t.median_score >= s.threshold or (
+            t.top_score >= min(0.95, s.threshold + 0.2) and t.hits >= s.min_frames)
 
     # -- lifecycle -------------------------------------------------------
     def _start(self, t: Track, st: _State, frame: np.ndarray, w: int, h: int, ts: float) -> None:

@@ -47,7 +47,7 @@ class DetectSettings:
     fps: float = 5.0           # frames per second analysed (from the substream)
     width: int = 640           # frames wider than this are scaled down before detection
     labels: tuple[str, ...] = DEFAULT_LABELS
-    min_score: float = 0.35    # a single detection must reach this to be considered
+    min_score: float = 0.2     # weakest detection kept; below 0.5 it can only extend an existing track
     threshold: float = 0.6     # an object's median score must reach this to become an event
     min_frames: int = 3        # ...over at least this many frames
 
@@ -59,7 +59,8 @@ class DetectorSettings:
     family: str = "yolox"      # output format of the model
     backend: str = "openvino"  # openvino (Intel CPU/GPU) | onnxruntime (cpu/cuda/tensorrt)
     device: str = ""           # "" = backend default (CPU)
-    threads: int = 0           # 0 = let the backend decide
+    threads: int = 0           # threads per inference; 0 = CPUs / workers
+    workers: int = 0           # inferences run in parallel; 0 = automatic (1 per 8 CPUs)
 
 
 @dataclass(frozen=True)
@@ -207,7 +208,7 @@ def _detector_settings(raw: Any) -> DetectorSettings:
         return DetectorSettings()
     if not isinstance(raw, dict):
         raise ConfigError("detector must be a mapping")
-    unknown = set(raw) - {"model", "family", "backend", "device", "threads"}
+    unknown = set(raw) - {"model", "family", "backend", "device", "threads", "workers"}
     if unknown:
         raise ConfigError(f"detector: unknown key(s) {sorted(unknown)}")
     backend = str(raw.get("backend", "openvino"))
@@ -219,6 +220,7 @@ def _detector_settings(raw: Any) -> DetectorSettings:
         backend=backend,
         device=str(raw.get("device", "")),
         threads=_as_int(raw.get("threads", 0), "detector.threads", 0),
+        workers=_as_int(raw.get("workers", 0), "detector.workers", 0),
     )
 
 

@@ -8,7 +8,9 @@ is chosen in config; nothing else in the system knows which one is running.
 from __future__ import annotations
 
 import logging
+import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -191,3 +193,39 @@ def load_model(family: str, path: Path, backend: str, device: str = "", threads:
         raise ValueError(f"unknown model family '{family}' (available: {', '.join(MODEL_FAMILIES)})")
     log.info("loading %s model %s on %s/%s", family, path.name, backend, device or "default")
     return MODEL_FAMILIES[family](make_backend(backend, path, device, threads))
+
+
+def cpu_count() -> int:
+    """CPUs this process may use (respects container CPU limits/affinity)."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:  # not Linux
+        return os.cpu_count() or 1
+
+
+def plan_threads(workers: int, threads: int, cpus: int | None = None) -> tuple[int, int]:
+    """Split the CPUs between parallel inferences so they don't fight over cores.
+
+    Several cameras each running the model with every core at once is what
+    made inference ~10x slower on a busy laptop. Default: one inference at a
+    time per 8 CPUs, each using its share of the cores.
+    """
+    cpus = cpus or cpu_count()
+    workers = workers or max(1, cpus // 8)
+    threads = threads or max(1, cpus // workers)
+    return workers, threads
+
+
+class InferencePool:
+    """All cameras share one model; requests queue for a fixed number of workers."""
+
+    def __init__(self, model, workers: int):
+        self.model = model
+        self.workers = workers
+        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="infer")
+
+    def detect(self, img: np.ndarray, min_score: float, labels: set[str] | None = None) -> list[Detection]:
+        return self._pool.submit(self.model.detect, img, min_score, labels).result()
+
+    def shutdown(self) -> None:
+        self._pool.shutdown(wait=False, cancel_futures=True)

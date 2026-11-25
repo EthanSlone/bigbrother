@@ -54,7 +54,7 @@ services:
     depends_on: [go2rtc, mosquitto]
     stop_grace_period: 15s
 
-  # One-off commands: `docker compose run --rm tools configure|probe|fakecam`
+  # One-off commands: `docker compose run --rm tools configure|probe|fakecam|evaluate`
   tools:
     build: .
     image: bigbrother:dev
@@ -63,6 +63,7 @@ services:
     volumes:
       - ./config:/config
       - ./testdata:/testdata:ro
+      - models:/models
 
   # Fake cameras for testing without real ones: loops clips from testdata/ as
   # password-protected RTSP cameras. Start with `docker compose --profile fakecam up -d`.

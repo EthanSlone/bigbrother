@@ -60,8 +60,8 @@ with snapshots. Click a snapshot to enlarge it.
 - **Grey box:** stationary (e.g. a parked car).
 - **Thin red outline:** raw motion.
 - **Per-camera numbers:**
-  - **in / detect fps:** frames received / frames the model actually analysed. The model
-    skips frames with no motion.
+  - **in / processed / detect fps:** frames decoded / frames handled / frames the model
+    actually analysed. The model skips frames with no motion.
   - **model ms:** time per analysis.
   - **filtered:** objects that never became events (brief or low-confidence detections).
   - **skipped:** frames dropped because the model was busy.
@@ -117,6 +117,7 @@ that way on this PC. On the Proxmox server, set `RECORDINGS_PATH` to a path on t
 | `docker compose --profile fakecam up -d` | Starts the stack plus the fake cameras |
 | `docker compose up -d` | Starts go2rtc, mosquitto, the recorder and the detector |
 | `docker compose logs -f detector` | Detector log; per-camera stats print every minute |
+| `docker compose run --rm tools evaluate /testdata/parking_lot.mp4 --fps 5 2` | Runs a clip through detection offline and counts events, to compare settings |
 | `docker compose restart go2rtc recorder` | Applies camera changes after re-running `configure` |
 
 ## How detection works
@@ -130,11 +131,18 @@ that way on this PC. On the Proxmox server, set `RECORDINGS_PATH` to a path on t
 3. **Find objects.** YOLOX-s (Apache-2.0, COCO-trained) finds people, vehicles, bikes and
    pets. It runs on OpenVINO on Intel CPUs. Moving to a GPU later is a config change:
    `detector.backend: onnxruntime`, `device: cuda`.
+   All cameras share one model through an inference pool, by default one inference at a
+   time per 8 CPUs. That way cameras queue for the CPU instead of fighting over it.
 4. **Track objects.** The tracker gives each object an identity across frames, so one
-   person walking by is one event. Car/truck/bus confusions count as the same object.
-   Objects that stop moving are marked stationary.
-5. **Confirm events.** An object becomes an event only after `min_frames` frames with a
-   median score of at least `threshold`. One confident frame of a shadow isn't enough.
+   person walking by is one event. It matches by box overlap first, then by distance in
+   the direction of travel. That keeps identities stable even when the model only runs
+   once or twice a second. Weak detections (below 0.5) can keep an existing track alive
+   but never start one. Car/truck/bus confusions count as the same object, and objects
+   that stop moving are marked stationary.
+5. **Confirm events.** An object becomes an event only once it has been seen for as long
+   as `min_frames` frames take at the configured fps, and either its median score
+   reaches `threshold` or one sighting is very confident (`threshold` + 0.2). One
+   confident frame of a shadow isn't enough.
 6. **Save and publish.** Each event keeps its best snapshot: confident, large, not cut off
    by the frame edge. Events go to SQLite and MQTT (`start` / `update` / `end`), plus a
    retained per-label count (`bigbrother/<camera>/person`) for Home Assistant later.

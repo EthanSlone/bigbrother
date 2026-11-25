@@ -43,6 +43,8 @@ def render_live(view) -> bytes | None:
     for b in view.motion:
         draw_box(img, b, RED, thickness=1)
     for t in view.tracks:
+        if t["missed"]:
+            continue  # not seen on the latest check: don't draw where it *was*
         color = GREY if t["stationary"] else GREEN if t["confirmed"] else YELLOW
         draw_box(img, t["box"], color, f"#{t['id']} {t['label']} {t['score']:.2f}")
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
@@ -96,7 +98,7 @@ async function stats(){
     if(!el){el=document.createElement('div');el.className='cam';el.id='cam-'+c.camera;
       el.innerHTML=`<img alt="${esc(c.name)}"><div class="meta"></div><div class="err"></div>`;camsEl.appendChild(el);}
     el.querySelector('.meta').innerHTML=`<b>${esc(c.name)}</b><span class="state-${esc(c.state)}">${esc(c.state)}</span>`+
-      `<span>in <b>${c.fps_in}</b> fps</span><span>detect <b>${c.detect_fps}</b> fps</span><span>model <b>${c.infer_ms??'-'}</b> ms</span>`+
+      `<span>in <b>${c.fps_in}</b> fps</span><span>processed <b>${c.fps_processed}</b></span><span>detect <b>${c.detect_fps}</b> fps</span><span>model <b>${c.infer_ms??'-'}</b> ms</span>`+
       `<span>events <b>${c.events_started}</b></span><span>filtered <b>${c.filtered}</b></span><span>skipped <b>${c.skipped_frames}</b></span>`;
     el.querySelector('.err').textContent=c.error||'';
   }

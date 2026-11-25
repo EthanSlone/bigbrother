@@ -45,13 +45,34 @@ def test_weak_detection_extends_but_never_starts_a_track():
     assert len(tr.tracks) == 1 and tr.tracks[0].hits == 2
 
 
-def test_track_ends_after_max_misses():
-    tr = Tracker(max_misses=3)
+def test_track_ends_after_misses_and_time_unseen():
+    tr = Tracker(max_misses=2, lost_seconds=2.0)
     tr.update([det("car", 0.9, 10, 10)], ts=0)
-    ended = []
-    for i in range(1, 5):
-        ended += tr.update([], ts=i * 0.2)
+    assert tr.update([], ts=0.5) == [] and tr.update([], ts=1.0) == []  # missed twice, but only 1 s
+    ended = tr.update([], ts=2.2)
     assert len(ended) == 1 and tr.tracks == []
+    # Not looking (no detection run) never ends a track, however long it's been.
+    tr.update([det("car", 0.9, 10, 10)], ts=10)
+    assert tr.update([], ts=60) == []  # first miss only
+
+
+def test_identity_kept_when_model_runs_only_once_per_second():
+    """At 1 check/s a walking person moves further than their own width: no overlap."""
+    tr = Tracker()
+    for i in range(6):
+        tr.update([det("person", 0.8, 50 + i * 60, 100)], ts=float(i))  # 60 px/s, box 40 wide
+    assert len(tr.tracks) == 1 and tr.tracks[0].hits == 6
+
+
+def test_distance_match_refuses_jump_against_direction_of_travel():
+    tr = Tracker()
+    for i in range(5):  # car driving right
+        tr.update([det("car", 0.9, 100 + i * 20, 100, 80, 40)], ts=i * 0.2)
+    car = tr.tracks[0]
+    # Car disappears; a different car shows up behind it, to the left.
+    tr.update([], ts=1.0)
+    tr.update([det("car", 0.9, 60, 100, 80, 40)], ts=1.4)
+    assert car.hits == 5 and len(tr.tracks) == 2
 
 
 def test_car_truck_confusion_is_one_object_with_majority_label():
@@ -95,14 +116,14 @@ def run_track(tmp_path, scores, settings=DetectSettings(min_frames=3, threshold=
     store = EventStore(tmp_path / "db.sqlite")
     pub = Recorder()
     em = EventManager("front", settings, store, tmp_path, pub)
-    tr = Tracker(max_misses=2)
+    tr = Tracker()
     frame = np.zeros((360, 640, 3), np.uint8)
     ts = 0.0
     for i, s in enumerate(scores):
         ended = tr.update([det("person", s, 100 + i * 8, 100)], ts)
         em.process(tr.tracks, ended, frame, ts)
         ts += 0.2
-    for _ in range(4):
+    for _ in range(15):  # > lost_seconds of empty frames
         ended = tr.update([], ts)
         em.process(tr.tracks, ended, frame, ts)
         ts += 0.2
@@ -128,6 +149,26 @@ def test_brief_or_low_scoring_objects_are_filtered(tmp_path):
     assert store.recent() == [] and em.filtered == 1
     em2, store2, _ = run_track(tmp_path / "b", [0.55, 0.5, 0.55, 0.52, 0.5])  # never confident enough
     assert store2.recent() == [] and em2.filtered == 1
+
+
+def test_slow_detection_still_confirms_by_time_seen(tmp_path):
+    """2 sightings 0.5 s apart confirm at 5 fps settings (they span the time 3 frames would)."""
+    em, store, _ = run_track(tmp_path, [0.8, 0.8],
+                             settings=DetectSettings(fps=5, min_frames=3, threshold=0.6))
+    assert em.filtered == 1  # 0.2 s apart: too brief
+    store2 = EventStore(tmp_path / "b.sqlite")
+    em2 = EventManager("front", DetectSettings(fps=5, min_frames=3, threshold=0.6), store2, tmp_path,
+                       lambda *a: None)
+    tr = Tracker()
+    frame = np.zeros((360, 640, 3), np.uint8)
+    for ts in (0.0, 0.5):
+        em2.process(tr.tracks, tr.update([det("person", 0.8, 100 + ts * 20, 100)], ts), frame, ts)
+    assert em2.started == 1
+
+
+def test_one_very_confident_sighting_confirms_a_consistent_track(tmp_path):
+    em, store, _ = run_track(tmp_path, [0.56, 0.45, 0.38, 0.87])  # median 0.5, top 0.87
+    assert em.started == 1
 
 
 def test_open_events_closed_after_restart(tmp_path):
@@ -195,6 +236,14 @@ def test_nms_suppresses_overlaps_and_label_filter_applies():
     keep = nms(boxes, np.array([0.9, 0.8, 0.7]), iou=0.5)
     assert list(keep) == [0, 2]
     assert iou((0, 0, 10, 10), (0, 0, 10, 10)) == pytest.approx(1.0)
+
+
+def test_thread_planning_splits_cpus_between_workers():
+    from bigbrother.detector.models import plan_threads
+    assert plan_threads(0, 0, cpus=8) == (1, 8)      # laptop: one inference at a time, all cores
+    assert plan_threads(0, 0, cpus=40) == (5, 8)     # server VM
+    assert plan_threads(2, 0, cpus=8) == (2, 4)
+    assert plan_threads(0, 3, cpus=4) == (1, 3)
 
 
 def test_builtin_models_have_checksums():

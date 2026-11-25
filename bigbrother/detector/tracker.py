@@ -1,9 +1,15 @@
 """Multi-object tracker: turns per-frame detections into objects with identities.
 
-ByteTrack-style two-stage matching on IoU against a constant-velocity
-prediction. Confident detections are matched first; weak ones may only extend
-existing tracks (so a person half-hidden behind a car stays the same object)
-and never start new ones.
+ByteTrack-style two-stage matching against a constant-velocity prediction.
+Confident detections are matched first; weak ones may only extend existing
+tracks (so a person half-hidden behind a car stays the same object) and never
+start new ones.
+
+Matching uses box overlap (IoU) first, then falls back to centre distance
+measured in object sizes. The allowed jump grows with the time since the
+track was last seen. That keeps identities stable when the model can only run
+a couple of times per second and people move further than their own width
+between checks.
 
 Misses are counted only on frames where detection actually ran. When nothing
 moves we skip the model entirely, and a parked car must not "disappear"
@@ -83,12 +89,18 @@ class Track:
 
 
 class Tracker:
-    def __init__(self, high_score: float = 0.5, match_iou: float = 0.2, max_misses: int = 8,
+    def __init__(self, high_score: float = 0.5, match_iou: float = 0.2, max_misses: int = 2,
+                 lost_seconds: float = 2.0, jump_base: float = 0.5, jump_per_second: float = 1.5,
                  stationary_seconds: float = 10.0, stationary_move: float = 0.15,
                  start_ids: int = 1):
         self.high_score = high_score
         self.match_iou = match_iou
-        self.max_misses = max_misses            # detection runs without a match before a track ends
+        # A track ends once it has missed at least `max_misses` detection runs AND has
+        # been unseen for `lost_seconds`, so behaviour doesn't depend on the model's speed.
+        self.max_misses = max_misses
+        self.lost_seconds = lost_seconds
+        self.jump_base = jump_base              # distance match allowance, in object sizes...
+        self.jump_per_second = jump_per_second  # ...plus this much per second since last seen
         self.stationary_seconds = stationary_seconds
         self.stationary_move = stationary_move  # movement (fraction of object size) that counts as moving
         self.tracks: list[Track] = []
@@ -109,7 +121,7 @@ class Tracker:
         ended = []
         for t in unmatched_tracks:
             t.misses += 1
-            if t.misses > self.max_misses:
+            if t.misses >= self.max_misses and ts - t.last_ts >= self.lost_seconds:
                 ended.append(t)
         if ended:
             self.tracks = [t for t in self.tracks if t not in ended]
@@ -124,18 +136,33 @@ class Tracker:
         return ended
 
     def _match(self, tracks: list[Track], dets: list[Detection], ts: float) -> list[Detection]:
-        """Greedy IoU matching; matched tracks are removed from `tracks`. Returns unmatched dets."""
+        """Greedy matching; matched tracks are removed from `tracks`. Returns unmatched dets.
+
+        Every overlap (IoU) match ranks above every distance-only match.
+        """
         if not tracks or not dets:
             return list(dets)
         pairs = []
         for ti, t in enumerate(tracks):
             pred = t.predicted(ts)
+            pc = center(pred)
+            size = t.size()
+            allowed = self.jump_base + self.jump_per_second * min(max(ts - t.last_ts, 0.0), 3.0)
             for di, d in enumerate(dets):
                 if group_of(d.label) != t.group:
                     continue
-                score = iou(pred, d.box)
-                if score >= self.match_iou:
-                    pairs.append((score, ti, di))
+                overlap = iou(pred, d.box)
+                if overlap >= self.match_iou:
+                    pairs.append((1.0 + overlap, ti, di))
+                    continue
+                dc = center(d.box)
+                dist = ((dc[0] - pc[0]) ** 2 + (dc[1] - pc[1]) ** 2) ** 0.5 / size
+                d_size = max(d.box[2] - d.box[0], d.box[3] - d.box[1], 1.0)
+                if dist > allowed or not 1 / 3 <= d_size / size <= 3:
+                    continue
+                if not self._direction_ok(t, dc):
+                    continue  # a moving object doesn't jump against its own direction of travel
+                pairs.append((1.0 - dist / allowed, ti, di))  # always < any IoU match
         pairs.sort(reverse=True)
         used_t, used_d = set(), set()
         for _, ti, di in pairs:
@@ -147,6 +174,20 @@ class Tracker:
         for ti in sorted(used_t, reverse=True):
             tracks.pop(ti)
         return [d for i, d in enumerate(dets) if i not in used_d]
+
+    @staticmethod
+    def _direction_ok(t: Track, new_center: tuple[float, float], min_cos: float = 0.5) -> bool:
+        vx = (t.velocity[0] + t.velocity[2]) / 2
+        vy = (t.velocity[1] + t.velocity[3]) / 2
+        speed = (vx * vx + vy * vy) ** 0.5
+        if speed < 0.3 * t.size():  # barely moving: any direction is plausible
+            return True
+        cx, cy = center(t.box)
+        dx, dy = new_center[0] - cx, new_center[1] - cy
+        dist = (dx * dx + dy * dy) ** 0.5
+        if dist < 0.25 * t.size():
+            return True
+        return (dx * vx + dy * vy) / (dist * speed) >= min_cos
 
     def _apply(self, t: Track, d: Detection, ts: float) -> None:
         dt = ts - t.last_ts

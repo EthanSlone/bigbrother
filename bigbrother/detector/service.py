@@ -19,7 +19,7 @@ from ..mqtt import Publisher
 from .events import EventManager
 from .frames import FrameSource
 from .model_store import resolve_model
-from .models import load_model
+from .models import InferencePool, load_model, plan_threads
 from .motion import MotionDetector, MotionResult
 from .tracker import Track, Tracker
 
@@ -43,7 +43,7 @@ class CameraWorker(threading.Thread):
         s = cam.detect
         self.source = FrameSource(cam.id, url, s.fps, s.width)
         self.motion = MotionDetector()
-        self.tracker = Tracker(max_misses=max(3, int(s.fps * 2)))  # ~2 s unseen ends a track
+        self.tracker = Tracker()
         self.events = EventManager(cam.id, s, store, data_dir, publish)
         self.model = model
         self.view = ViewState()
@@ -51,7 +51,8 @@ class CameraWorker(threading.Thread):
         self._last_check = 0.0
         self._infer_ms: deque[float] = deque(maxlen=50)
         self._detect_ts: deque[float] = deque(maxlen=200)
-        self._frame_ts: deque[float] = deque(maxlen=200)
+        self._frame_ts: deque[float] = deque(maxlen=200)    # frames processed
+        self._in_samples: deque[tuple[float, int]] = deque(maxlen=60)  # (time, decoder frame count)
         self.skipped = 0
 
     def stop(self) -> None:
@@ -108,10 +109,16 @@ class CameraWorker(threading.Thread):
             span = q[-1] - q[0]
             return round((len(q) - 1) / span, 2) if span > 0 else 0.0
 
+        now = time.monotonic()
+        self._in_samples.append((now, self.source.frames_in))
+        while len(self._in_samples) > 2 and now - self._in_samples[0][0] > 30:
+            self._in_samples.popleft()
+        (t0, n0), (t1, n1) = self._in_samples[0], self._in_samples[-1]
+        fps_in = round((n1 - n0) / (t1 - t0), 2) if t1 > t0 else 0.0
         return {
             "camera": self.cam.id, "name": self.cam.name, "state": self.source.state,
             "error": self.source.error, "size": self.source.size,
-            "fps_in": rate(self._frame_ts), "detect_fps": rate(self._detect_ts),
+            "fps_in": fps_in, "fps_processed": rate(self._frame_ts), "detect_fps": rate(self._detect_ts),
             "infer_ms": round(sum(self._infer_ms) / len(self._infer_ms), 1) if self._infer_ms else None,
             "skipped_frames": self.skipped, "tracks": len(self.tracker.tracks),
             "events_started": self.events.started, "filtered": self.events.filtered,
@@ -125,7 +132,10 @@ def run(cfg: Config, data_dir: Path, db_path: Path, viewer_port: int) -> None:
 
     d = cfg.detector
     model_path, builtin_family = resolve_model(d.model)
-    model = load_model(builtin_family or d.family, model_path, d.backend, d.device, d.threads)
+    workers, threads = plan_threads(d.workers, d.threads)
+    log.info("inference: %d worker(s) x %d thread(s)", workers, threads)
+    model = InferencePool(load_model(builtin_family or d.family, model_path, d.backend, d.device, threads),
+                          workers)
 
     store = EventStore(db_path)
     closed = store.close_open(time.time())
@@ -172,6 +182,7 @@ def run(cfg: Config, data_dir: Path, db_path: Path, viewer_port: int) -> None:
             w.stop()
         for w in workers:
             w.join(timeout=10)
+        model.shutdown()
         if mqtt:
             mqtt.stop()
         store.close()

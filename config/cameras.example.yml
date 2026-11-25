@@ -8,7 +8,8 @@ detector:
   model: yolox_s          # yolox_tiny | yolox_s (default) | yolox_m, or a path to an .onnx
   backend: openvino       # openvino (Intel CPU) | onnxruntime (cpu, or cuda/tensorrt with a GPU)
   # device: CPU           # backend default if omitted
-  # threads: 0            # 0 = automatic
+  # threads: 0            # threads per inference, 0 = automatic
+  # workers: 0            # parallel inferences, 0 = automatic (1 per 8 CPUs)
 
 # Defaults applied to every camera (each camera can override).
 defaults:
@@ -20,7 +21,7 @@ defaults:
     enabled: true
     fps: 5                # frames analysed per second (from the substream)
     labels: [person, car, truck, bus, motorcycle, bicycle, dog, cat]
-    min_score: 0.35       # weakest single detection considered
+    min_score: 0.2        # weakest detection kept (below 0.5 it can only extend an existing track)
     threshold: 0.6        # median score an object needs to become an event
     min_frames: 3         # ...seen on at least this many frames
 

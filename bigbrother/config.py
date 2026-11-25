@@ -66,6 +66,9 @@ class DetectorSettings:
     device: str = ""           # "" = backend default (CPU)
     threads: int = 0           # threads per inference; 0 = CPUs / workers
     workers: int = 0           # inferences run in parallel; 0 = automatic (1 per 8 CPUs)
+    # Model input (width, height). Cameras are 16:9, so 640x384 skips the grey padding a
+    # square 640x640 input wastes (~40% less work, same detections). None = model's own size.
+    input_size: tuple[int, int] | None = (640, 384)
 
 
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -262,7 +265,7 @@ def _detector_settings(raw: Any) -> DetectorSettings:
         return DetectorSettings()
     if not isinstance(raw, dict):
         raise ConfigError("detector must be a mapping")
-    unknown = set(raw) - {"model", "family", "backend", "device", "threads", "workers"}
+    unknown = set(raw) - {"model", "family", "backend", "device", "threads", "workers", "input_size"}
     if unknown:
         raise ConfigError(f"detector: unknown key(s) {sorted(unknown)}")
     backend = str(raw.get("backend", "openvino"))
@@ -275,7 +278,23 @@ def _detector_settings(raw: Any) -> DetectorSettings:
         device=str(raw.get("device", "")),
         threads=_as_int(raw.get("threads", 0), "detector.threads", 0),
         workers=_as_int(raw.get("workers", 0), "detector.workers", 0),
+        input_size=_input_size(raw.get("input_size", "default")),
     )
+
+
+def _input_size(raw: Any) -> tuple[int, int] | None:
+    """detector.input_size: [width, height] in multiples of 32, or "native" for the model's own."""
+    if raw == "default":
+        return DetectorSettings.input_size
+    if raw is None or raw == "native":
+        return None
+    if (not isinstance(raw, (list, tuple)) or len(raw) != 2
+            or not all(isinstance(v, int) and not isinstance(v, bool) for v in raw)):
+        raise ConfigError('detector.input_size must be [width, height], e.g. [640, 384], or "native"')
+    w, h = raw
+    if not (64 <= w <= 1920 and 64 <= h <= 1920) or w % 32 or h % 32:
+        raise ConfigError("detector.input_size: width and height must be multiples of 32 between 64 and 1920")
+    return (w, h)
 
 
 def _zones(raw: Any, where: str) -> dict[str, Zone]:

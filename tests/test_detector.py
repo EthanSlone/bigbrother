@@ -299,3 +299,49 @@ def test_real_model_finds_a_person_shaped_blob_or_nothing_spurious():
     from bigbrother.detector.models import load_model
     model = load_model("yolox", Path("/tmp/models/yolox_s.onnx"), "openvino", threads=1)
     assert model.detect(np.full((360, 640, 3), 120, np.uint8), 0.35) == []
+
+
+def test_detector_input_size_config():
+    from bigbrother.config import ConfigError, parse_config
+    cam = {"cameras": {"a": {"streams": {"main": "rtsp://h/1"}}}}
+    assert parse_config(cam).detector.input_size == (640, 384)
+    assert parse_config({**cam, "detector": {"input_size": "native"}}).detector.input_size is None
+    assert parse_config({**cam, "detector": {"input_size": [416, 256]}}).detector.input_size == (416, 256)
+    for bad in ([640, 360], [640], "640x384", [True, 384], [32, 32]):
+        with pytest.raises(ConfigError):
+            parse_config({**cam, "detector": {"input_size": bad}})
+
+
+def test_inference_pool_reports_queue_wait_separately():
+    """With one worker, a second camera waits for the first: that wait must not count as model time."""
+    import threading
+    import time as _t
+    from bigbrother.detector.models import InferencePool
+
+    class Slow:
+        def detect(self, img, min_score, labels=None):
+            _t.sleep(0.2)
+            return []
+
+    pool = InferencePool(Slow(), workers=1)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(pool.detect_timed(None, 0.5)))
+               for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    infer = sorted(r[1] for r in results)
+    wait = sorted(r[2] for r in results)
+    assert all(180 <= ms < 400 for ms in infer)      # each inference ~200 ms
+    assert wait[0] < 50 and wait[1] >= 150           # the second one queued behind the first
+    pool.shutdown()
+
+
+@pytest.mark.skipif(not Path("/tmp/models/yolox_s.onnx").exists(), reason="model not downloaded")
+def test_real_model_runs_at_16x9_input():
+    from bigbrother.detector.models import load_model
+    model = load_model("yolox", Path("/tmp/models/yolox_s.onnx"), "openvino", threads=1,
+                       input_size=(640, 384))
+    assert model.backend.input_shape == (384, 640)
+    assert model.detect(np.full((360, 640, 3), 120, np.uint8), 0.35) == []

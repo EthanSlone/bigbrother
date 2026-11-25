@@ -63,7 +63,9 @@ with snapshots. Click a snapshot to enlarge it.
 - **Per-camera numbers:**
   - **preview / analysed / detect fps:** frames shown in your browser / frames checked for
     motion / frames the model actually ran on. The model skips frames with no motion.
-  - **model ms:** time per analysis.
+  - **model ms:** how long the model takes per frame.
+  - **wait ms:** time a frame spent queued behind other cameras. If this climbs, the CPU
+    can't keep up: give the VM more cores or raise `detector.workers`.
   - **filtered:** objects that never became events (brief or low-confidence detections).
   - **skipped:** frames dropped because the model was busy.
 
@@ -173,6 +175,9 @@ that way on this PC. On the Proxmox server, set `RECORDINGS_PATH` to a path on t
    `detector.backend: onnxruntime`, `device: cuda`.
    All cameras share one model through an inference pool, by default one inference at a
    time per 8 CPUs. That way cameras queue for the CPU instead of fighting over it.
+   The model runs at 640x384 rather than its native 640x640: camera frames are 16:9, so
+   a square input is ~40% grey padding. Same detections, ~40% less work
+   (`detector.input_size`).
 4. **Track objects.** The tracker gives each object an identity across frames, so one
    person walking by is one event. It matches by box overlap first, then by distance in
    the direction of travel. That keeps identities stable even when the model only runs

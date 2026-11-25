@@ -100,7 +100,7 @@ async function stats(){
     if(!el){el=document.createElement('div');el.className='cam';el.id='cam-'+c.camera;
       el.innerHTML=`<img alt="${esc(c.name)}"><div class="meta"></div><div class="err"></div>`;camsEl.appendChild(el);}
     el.querySelector('.meta').innerHTML=`<b>${esc(c.name)}</b><span class="state-${esc(c.state)}">${esc(c.state)}</span>`+
-      `<span>preview <b>${(viewFps[c.camera]||0).toFixed(1)}</b> fps</span><span>analysed <b>${c.fps_analysed}</b></span><span>detect <b>${c.detect_fps}</b> fps</span><span>model <b>${c.infer_ms??'-'}</b> ms</span>`+
+      `<span>preview <b>${(viewFps[c.camera]||0).toFixed(1)}</b> fps</span><span>analysed <b>${c.fps_analysed}</b></span><span>detect <b>${c.detect_fps}</b> fps</span><span title="time the model takes per frame">model <b>${c.infer_ms??'-'}</b> ms</span><span title="time spent queued behind other cameras">wait <b>${c.wait_ms??'-'}</b> ms</span>`+
       `<span>events <b>${c.events_started}</b></span><span>filtered <b>${c.filtered}</b></span><span>skipped <b>${c.skipped_frames}</b></span>`+
       `<button onclick="openEditor('${esc(c.camera)}')">Zones &amp; masks</button>`;
     el.querySelector('.err').textContent=c.error||'';

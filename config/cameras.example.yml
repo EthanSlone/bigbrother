@@ -10,6 +10,7 @@ detector:
   # device: CPU           # backend default if omitted
   # threads: 0            # threads per inference, 0 = automatic
   # workers: 0            # parallel inferences, 0 = automatic (1 per 8 CPUs)
+  # input_size: [640, 384] # model input (width, height); 16:9 avoids padding. "native" = 640x640
 
 # Alerts: what gets sent to your phone (Pushover keys go in .env).
 alerts:

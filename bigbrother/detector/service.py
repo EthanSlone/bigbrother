@@ -56,6 +56,7 @@ class CameraWorker(threading.Thread):
         self._stop = threading.Event()
         self._last_check = 0.0
         self._infer_ms: deque[float] = deque(maxlen=50)
+        self._wait_ms: deque[float] = deque(maxlen=50)
         self._detect_ts: deque[float] = deque(maxlen=200)
         self._frame_ts: deque[float] = deque(maxlen=200)    # frames processed
         self.skipped = 0
@@ -94,9 +95,9 @@ class CameraWorker(threading.Thread):
         )
         if need:
             s = self.cam.detect
-            t0 = time.perf_counter()
-            dets = self.model.detect(img, s.min_score, set(s.labels))
-            self._infer_ms.append((time.perf_counter() - t0) * 1000)
+            dets, infer_ms, wait_ms = self.model.detect_timed(img, s.min_score, set(s.labels))
+            self._infer_ms.append(infer_ms)
+            self._wait_ms.append(wait_ms)
             h, w = img.shape[:2]
             if self.cam.object_masks:
                 dets = [d for d in dets if not in_any(ground_point(d.box, w, h), self.cam.object_masks)]
@@ -131,6 +132,7 @@ class CameraWorker(threading.Thread):
             "error": self.source.error, "size": self.source.size,
             "fps_in": fps_in, "fps_analysed": rate(self._frame_ts), "detect_fps": rate(self._detect_ts),
             "infer_ms": round(sum(self._infer_ms) / len(self._infer_ms), 1) if self._infer_ms else None,
+            "wait_ms": round(sum(self._wait_ms) / len(self._wait_ms), 1) if self._wait_ms else None,
             "skipped_frames": self.skipped, "tracks": len(self.tracker.tracks),
             "events_started": self.events.started, "filtered": self.events.filtered,
         }
@@ -146,8 +148,8 @@ def run(cfg: Config, data_dir: Path, db_path: Path, viewer_port: int,
     model_path, builtin_family = resolve_model(d.model)
     workers, threads = plan_threads(d.workers, d.threads)
     log.info("inference: %d worker(s) x %d thread(s)", workers, threads)
-    model = InferencePool(load_model(builtin_family or d.family, model_path, d.backend, d.device, threads),
-                          workers)
+    model = InferencePool(load_model(builtin_family or d.family, model_path, d.backend, d.device, threads,
+                                     d.input_size), workers)
 
     store = EventStore(db_path)
     closed = store.close_open(time.time())
@@ -192,8 +194,8 @@ def run(cfg: Config, data_dir: Path, db_path: Path, viewer_port: int,
             stop.wait(60)
             for w in workers:
                 s = w.stats()
-                log.info("[%s] %s in=%.1ffps detect=%.1ffps infer=%sms events=%d filtered=%d skipped=%d",
-                         s["camera"], s["state"], s["fps_in"], s["detect_fps"], s["infer_ms"],
+                log.info("[%s] %s in=%.1ffps detect=%.1ffps infer=%sms wait=%sms events=%d filtered=%d skipped=%d",
+                         s["camera"], s["state"], s["fps_in"], s["detect_fps"], s["infer_ms"], s["wait_ms"],
                          s["events_started"], s["filtered"], s["skipped_frames"])
     finally:
         log.info("shutting down %d camera worker(s)", len(workers))

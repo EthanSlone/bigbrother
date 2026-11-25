@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,15 +72,20 @@ def disable_openvino_telemetry() -> None:
 class OpenVINOBackend:
     """Intel CPUs (and Intel GPUs). Default for the R730xd today."""
 
-    def __init__(self, model_path: Path, device: str = "CPU", threads: int = 0):
+    def __init__(self, model_path: Path, device: str = "CPU", threads: int = 0,
+                 input_hw: tuple[int, int] | None = None):
         disable_openvino_telemetry()
         import openvino as ov
 
         core = ov.Core()
+        model = core.read_model(str(model_path))
+        if input_hw:
+            # YOLOX is fully convolutional, so the input can be any multiple of 32.
+            model.reshape({model.input(0).any_name: [1, 3, *input_hw]})
         props = {"PERFORMANCE_HINT": "LATENCY"}
         if threads:
             props["INFERENCE_NUM_THREADS"] = threads
-        self._compiled = core.compile_model(str(model_path), device, props)
+        self._compiled = core.compile_model(model, device, props)
         shape = self._compiled.input(0).shape
         self.input_shape = (int(shape[2]), int(shape[3]))
         self._local = threading.local()  # one infer request per calling thread
@@ -100,8 +106,12 @@ class OnnxRuntimeBackend:
         "tensorrt": ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"],
     }
 
-    def __init__(self, model_path: Path, device: str = "cpu", threads: int = 0):
+    def __init__(self, model_path: Path, device: str = "cpu", threads: int = 0,
+                 input_hw: tuple[int, int] | None = None):
         import onnxruntime as ort
+
+        if input_hw:
+            log.warning("onnxruntime runs the model at its own input size; input_size is ignored")
 
         opts = ort.SessionOptions()
         if threads:
@@ -115,11 +125,12 @@ class OnnxRuntimeBackend:
         return self._sess.run(None, {self._name: tensor})[0]
 
 
-def make_backend(kind: str, model_path: Path, device: str, threads: int) -> Backend:
+def make_backend(kind: str, model_path: Path, device: str, threads: int,
+                 input_hw: tuple[int, int] | None = None) -> Backend:
     if kind == "openvino":
-        return OpenVINOBackend(model_path, device or "CPU", threads)
+        return OpenVINOBackend(model_path, device or "CPU", threads, input_hw)
     if kind == "onnxruntime":
-        return OnnxRuntimeBackend(model_path, device or "cpu", threads)
+        return OnnxRuntimeBackend(model_path, device or "cpu", threads, input_hw)
     raise ValueError(f"unknown detector backend '{kind}' (use openvino or onnxruntime)")
 
 
@@ -206,11 +217,16 @@ class YoloxModel:
 MODEL_FAMILIES = {"yolox": YoloxModel}
 
 
-def load_model(family: str, path: Path, backend: str, device: str = "", threads: int = 0):
+def load_model(family: str, path: Path, backend: str, device: str = "", threads: int = 0,
+               input_size: tuple[int, int] | None = None):
+    """input_size is (width, height); None keeps the model's own input size."""
     if family not in MODEL_FAMILIES:
         raise ValueError(f"unknown model family '{family}' (available: {', '.join(MODEL_FAMILIES)})")
-    log.info("loading %s model %s on %s/%s", family, path.name, backend, device or "default")
-    return MODEL_FAMILIES[family](make_backend(backend, path, device, threads))
+    input_hw = (input_size[1], input_size[0]) if input_size else None
+    m = MODEL_FAMILIES[family](make_backend(backend, path, device, threads, input_hw))
+    h, w = m.backend.input_shape
+    log.info("loaded %s model %s on %s/%s, input %dx%d", family, path.name, backend, device or "default", w, h)
+    return m
 
 
 def cpu_count() -> int:
@@ -243,7 +259,21 @@ class InferencePool:
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="infer")
 
     def detect(self, img: np.ndarray, min_score: float, labels: set[str] | None = None) -> list[Detection]:
-        return self._pool.submit(self.model.detect, img, min_score, labels).result()
+        return self.detect_timed(img, min_score, labels)[0]
+
+    def detect_timed(self, img: np.ndarray, min_score: float,
+                     labels: set[str] | None = None) -> tuple[list[Detection], float, float]:
+        """Detections plus (inference ms, ms spent queued behind other cameras)."""
+        submitted = time.perf_counter()
+        started = []
+
+        def job():
+            started.append(time.perf_counter())
+            return self.model.detect(img, min_score, labels)
+
+        dets = self._pool.submit(job).result()
+        done = time.perf_counter()
+        return dets, (done - started[0]) * 1000, (started[0] - submitted) * 1000
 
     def shutdown(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)

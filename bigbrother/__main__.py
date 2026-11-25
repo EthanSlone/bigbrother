@@ -89,14 +89,14 @@ def _detector(args) -> int:
 
 
 def _evaluate(args) -> int:
-    from .config import DetectSettings
+    from .config import DetectorSettings, DetectSettings
     from .detector.evaluate import evaluate_clip
     from .detector.model_store import resolve_model
     from .detector.models import load_model, plan_threads
 
     path, family = resolve_model(args.model)
     _, threads = plan_threads(1, 0)
-    model = load_model(family or "yolox", path, args.backend, "", threads)
+    model = load_model(family or "yolox", path, args.backend, "", threads, DetectorSettings.input_size)
     for clip in args.clips:
         for fps in args.fps:
             r = evaluate_clip(Path(clip), model, fps=fps, settings=DetectSettings(fps=fps))

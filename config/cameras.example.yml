@@ -3,12 +3,26 @@
 # variables from .env as ${NAME}. After editing, run:
 #   docker compose run --rm tools configure
 
+# Object detection model and the hardware it runs on.
+detector:
+  model: yolox_s          # yolox_tiny | yolox_s (default) | yolox_m, or a path to an .onnx
+  backend: openvino       # openvino (Intel CPU) | onnxruntime (cpu, or cuda/tensorrt with a GPU)
+  # device: CPU           # backend default if omitted
+  # threads: 0            # 0 = automatic
+
 # Defaults applied to every camera (each camera can override).
 defaults:
   record:
     enabled: true
     audio: false          # true = record audio (G.711 is converted to AAC)
     segment_seconds: 60   # length of each recording file
+  detect:
+    enabled: true
+    fps: 5                # frames analysed per second (from the substream)
+    labels: [person, car, truck, bus, motorcycle, bicycle, dog, cat]
+    min_score: 0.35       # weakest single detection considered
+    threshold: 0.6        # median score an object needs to become an event
+    min_frames: 3         # ...seen on at least this many frames
 
 storage:
   retention_days: 30      # delete recordings older than this

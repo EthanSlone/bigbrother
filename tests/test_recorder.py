@@ -83,8 +83,11 @@ def test_end_to_end_segmenting_and_organizing(tmp_path):
     assert not list(cache.glob("*.mp4"))
     files = sorted(root.glob("front/*/*/*.mp4"))
     assert len(files) == moved
-    seg = index.oldest(1)[0]
-    assert 5 < seg.end_ts - seg.start_ts < 15
+    segs = index.oldest(10)
+    # First and last segments are partial (clock-aligned cuts); every full one is ~10 s.
+    for seg in segs[1:-1]:
+        assert 8 < seg.end_ts - seg.start_ts < 13
+    assert all(0 < s.end_ts - s.start_ts < 13 for s in segs)
 
 
 def _seed(root: Path, index: RecordingIndex, camera: str, start: float, size=1000):

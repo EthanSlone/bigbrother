@@ -4,14 +4,17 @@ A self-hosted NVR built to replace Frigate: proven plumbing (go2rtc, ffmpeg) wit
 detection, verification and alerting on top. The design and decisions live in the
 "NVR Tool" project (`design/architecture.md`).
 
-**Status: Phase 1.** Camera probe, go2rtc stream hub, 24/7 recording with retention, and an
-MQTT event bus. Detection, alerts and the web app come next.
+**Status: Phase 2.** Camera probe, go2rtc stream hub, 24/7 recording with retention, object
+detection with tracking and a debug viewer, and an MQTT event bus. Next come alerts
+(Phase 3), then the app (Phase 4).
 
 ```
-Cameras ──RTSP──> go2rtc ──restream──> recorder ──> /recordings/<camera>/<date>/<hour>/<MM.SS>.mp4
-                    │                     │                      + SQLite index (/data)
-                    │                     └──> MQTT: bigbrother/recorder/<camera>/state
-                    └──> (later) detector, live view
+Cameras ──RTSP──> go2rtc ─┬─ main ──> recorder ──> /recordings/<camera>/<date>/<hour>/<MM.SS>.mp4
+                          │
+                          └─ sub ───> detector: motion → YOLOX → tracker → events
+                                         ├─> /data: events DB + snapshots
+                                         ├─> MQTT: bigbrother/events, bigbrother/<camera>/<label>
+                                         └─> debug viewer http://localhost:5050
 ```
 
 ## Test setup on Windows
@@ -46,6 +49,25 @@ Cameras ──RTSP──> go2rtc ──restream──> recorder ──> /recordi
      `docker compose exec recorder ls -R /recordings`
    - Copy a clip out to watch it:
      `docker compose cp recorder:/recordings/front_door/2026-11-25/18/15.00.mp4 .`
+
+### Detection debug viewer
+
+Open **http://localhost:5050**. It shows each camera live with boxes and the recent events
+with snapshots. Click a snapshot to enlarge it.
+
+- **Green box:** a confirmed event.
+- **Yellow box:** being tracked, not confirmed yet.
+- **Grey box:** stationary (e.g. a parked car).
+- **Thin red outline:** raw motion.
+- **Per-camera numbers:**
+  - **in / detect fps:** frames received / frames the model actually analysed. The model
+    skips frames with no motion.
+  - **model ms:** time per analysis.
+  - **filtered:** objects that never became events (brief or low-confidence detections).
+  - **skipped:** frames dropped because the model was busy.
+
+The detection model (~36 MB) downloads automatically on first start. It's verified by
+checksum and cached in a Docker volume.
 
 ### Testing without cameras
 
@@ -93,8 +115,35 @@ that way on this PC. On the Proxmox server, set `RECORDINGS_PATH` to a path on t
 | `docker compose run --rm tools probe` | Phase 0 camera report |
 | `docker compose run --rm tools fakecam` | Turns clips in `testdata/` into fake cameras |
 | `docker compose --profile fakecam up -d` | Starts the stack plus the fake cameras |
-| `docker compose up -d` | Starts go2rtc, mosquitto and the recorder |
+| `docker compose up -d` | Starts go2rtc, mosquitto, the recorder and the detector |
+| `docker compose logs -f detector` | Detector log; per-camera stats print every minute |
 | `docker compose restart go2rtc recorder` | Applies camera changes after re-running `configure` |
+
+## How detection works
+
+1. **Decode the substream.** ffmpeg decodes each camera's substream at `fps` (default 5)
+   frames per second, scaled to at most 640 px wide.
+2. **Check for motion.** A cheap motion check runs on every frame. The model only runs
+   when something moves, while a moving object is being tracked, or every 30 s to
+   re-confirm parked objects. Whole-frame changes (IR switching on, exposure jumps) count
+   as lighting changes, not motion.
+3. **Find objects.** YOLOX-s (Apache-2.0, COCO-trained) finds people, vehicles, bikes and
+   pets. It runs on OpenVINO on Intel CPUs. Moving to a GPU later is a config change:
+   `detector.backend: onnxruntime`, `device: cuda`.
+4. **Track objects.** The tracker gives each object an identity across frames, so one
+   person walking by is one event. Car/truck/bus confusions count as the same object.
+   Objects that stop moving are marked stationary.
+5. **Confirm events.** An object becomes an event only after `min_frames` frames with a
+   median score of at least `threshold`. One confident frame of a shadow isn't enough.
+6. **Save and publish.** Each event keeps its best snapshot: confident, large, not cut off
+   by the frame edge. Events go to SQLite and MQTT (`start` / `update` / `end`), plus a
+   retained per-label count (`bigbrother/<camera>/person`) for Home Assistant later.
+
+**Model choice (benchmarked 2026-11-25 on the test clips):**
+- **yolox_tiny:** missed most cars seen from above.
+- **yolox_s:** found every person, cyclist and car, at ~40 ms per frame per 2 cores.
+- **yolox_m:** ~2x slower for a small gain. It's reserved for the Phase 3 "second opinion"
+  check before alerts.
 
 ## How recording works
 
@@ -121,5 +170,6 @@ Tests include a real ffmpeg segmenting run (skipped if ffmpeg isn't installed).
 ## Security
 
 Only the future web app/API will ever be exposed through the reverse proxy. go2rtc
-(1984/8554) is bound to localhost, and MQTT isn't published at all. Keep cameras on an
+(1984/8554) and the debug viewer (5050) are bound to localhost, and MQTT isn't published at
+all. Keep cameras on an
 isolated VLAN with no internet access.

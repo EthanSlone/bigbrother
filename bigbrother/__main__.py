@@ -4,6 +4,8 @@
     python -m bigbrother probe       report codec/resolution/fps/keyframes for every stream
     python -m bigbrother fakecam     turn clips in testdata/ into fake RTSP cameras
     python -m bigbrother recorder    run the recording service
+    python -m bigbrother detector    run the detection service (+ debug viewer)
+    python -m bigbrother models      download/verify built-in detection models
 """
 
 from __future__ import annotations
@@ -75,6 +77,27 @@ def _fakecam(args) -> int:
     return 0
 
 
+def _detector(args) -> int:
+    from .detector.service import run
+
+    cfg = load_config(args.config)
+    run(cfg, Path(args.data), Path(args.db), args.viewer_port)
+    return 0
+
+
+def _models(args) -> int:
+    from .detector.model_store import BUILTIN, resolve_model
+
+    names = args.names or ["yolox_s"]
+    for name in names:
+        if name not in BUILTIN:
+            print(f"unknown model {name}; built in: {', '.join(BUILTIN)}")
+            return 1
+        path, _ = resolve_model(name)
+        print(f"{name}: {path} ({BUILTIN[name].note})")
+    return 0
+
+
 def _recorder(args) -> int:
     from .recorder.service import run
 
@@ -104,6 +127,16 @@ def main(argv: list[str] | None = None) -> int:
     f = sub.add_parser("fakecam", help="turn video files in testdata/ into fake RTSP cameras")
     f.add_argument("--testdata", default="/testdata")
     f.set_defaults(func=_fakecam)
+
+    d = sub.add_parser("detector", help="run the detection service")
+    d.add_argument("--data", default="/data")
+    d.add_argument("--db", default="/data/bigbrother.db")
+    d.add_argument("--viewer-port", type=int, default=5050, help="debug viewer port (0 = off)")
+    d.set_defaults(func=_detector)
+
+    mo = sub.add_parser("models", help="download built-in detection models")
+    mo.add_argument("names", nargs="*")
+    mo.set_defaults(func=_models)
 
     r = sub.add_parser("recorder", help="run the recording service")
     r.add_argument("--recordings", default="/recordings")

@@ -38,6 +38,30 @@ class RecordSettings:
     retention_days: int | None = None  # None -> use storage default
 
 
+DEFAULT_LABELS = ("person", "car", "truck", "bus", "motorcycle", "bicycle", "dog", "cat")
+
+
+@dataclass(frozen=True)
+class DetectSettings:
+    enabled: bool = True
+    fps: float = 5.0           # frames per second analysed (from the substream)
+    width: int = 640           # frames wider than this are scaled down before detection
+    labels: tuple[str, ...] = DEFAULT_LABELS
+    min_score: float = 0.35    # a single detection must reach this to be considered
+    threshold: float = 0.6     # an object's median score must reach this to become an event
+    min_frames: int = 3        # ...over at least this many frames
+
+
+@dataclass(frozen=True)
+class DetectorSettings:
+    """Which model runs, and on what hardware. Changing hardware = changing backend/device."""
+    model: str = "yolox_s"     # built-in name (yolox_tiny/yolox_s/yolox_m) or a path to an .onnx
+    family: str = "yolox"      # output format of the model
+    backend: str = "openvino"  # openvino (Intel CPU/GPU) | onnxruntime (cpu/cuda/tensorrt)
+    device: str = ""           # "" = backend default (CPU)
+    threads: int = 0           # 0 = let the backend decide
+
+
 @dataclass(frozen=True)
 class Camera:
     id: str
@@ -45,6 +69,7 @@ class Camera:
     main: str  # raw URL, may contain ${VARS}
     sub: str | None
     record: RecordSettings
+    detect: DetectSettings = field(default_factory=DetectSettings)
 
     @property
     def main_stream(self) -> str:
@@ -55,6 +80,11 @@ class Camera:
     def sub_stream(self) -> str | None:
         """go2rtc stream name for the substream (detection), if any."""
         return f"{self.id}_sub" if self.sub else None
+
+    @property
+    def detect_stream(self) -> str:
+        """Detection uses the substream when there is one (much cheaper to decode)."""
+        return self.sub_stream or self.main_stream
 
 
 @dataclass(frozen=True)
@@ -67,6 +97,7 @@ class StorageSettings:
 class Config:
     cameras: dict[str, Camera]
     storage: StorageSettings = field(default_factory=StorageSettings)
+    detector: DetectorSettings = field(default_factory=DetectorSettings)
     go2rtc_url: str = "rtsp://go2rtc:8554"
     mqtt_host: str = "mosquitto"
     mqtt_port: int = 1883
@@ -140,6 +171,57 @@ def _record_settings(raw: Any, base: RecordSettings, where: str) -> RecordSettin
     )
 
 
+def _number(value: Any, where: str, lo: float, hi: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not lo <= value <= hi:
+        raise ConfigError(f"{where} must be a number between {lo} and {hi}, got {value!r}")
+    return float(value)
+
+
+def _detect_settings(raw: Any, base: DetectSettings, where: str) -> DetectSettings:
+    if raw is None:
+        return base
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a mapping")
+    unknown = set(raw) - {"enabled", "fps", "width", "labels", "min_score", "threshold", "min_frames"}
+    if unknown:
+        raise ConfigError(f"{where}: unknown key(s) {sorted(unknown)}")
+    labels = raw.get("labels", base.labels)
+    if not isinstance(labels, (list, tuple)) or not labels or not all(isinstance(x, str) for x in labels):
+        raise ConfigError(f"{where}.labels must be a non-empty list of names")
+    settings = DetectSettings(
+        enabled=bool(raw.get("enabled", base.enabled)),
+        fps=_number(raw.get("fps", base.fps), f"{where}.fps", 0.5, 30),
+        width=_as_int(raw.get("width", base.width), f"{where}.width", 160),
+        labels=tuple(labels),
+        min_score=_number(raw.get("min_score", base.min_score), f"{where}.min_score", 0.05, 0.99),
+        threshold=_number(raw.get("threshold", base.threshold), f"{where}.threshold", 0.05, 0.99),
+        min_frames=_as_int(raw.get("min_frames", base.min_frames), f"{where}.min_frames", 1),
+    )
+    if settings.threshold < settings.min_score:
+        raise ConfigError(f"{where}: threshold must be >= min_score")
+    return settings
+
+
+def _detector_settings(raw: Any) -> DetectorSettings:
+    if raw is None:
+        return DetectorSettings()
+    if not isinstance(raw, dict):
+        raise ConfigError("detector must be a mapping")
+    unknown = set(raw) - {"model", "family", "backend", "device", "threads"}
+    if unknown:
+        raise ConfigError(f"detector: unknown key(s) {sorted(unknown)}")
+    backend = str(raw.get("backend", "openvino"))
+    if backend not in ("openvino", "onnxruntime"):
+        raise ConfigError("detector.backend must be openvino or onnxruntime")
+    return DetectorSettings(
+        model=str(raw.get("model", "yolox_s")),
+        family=str(raw.get("family", "yolox")),
+        backend=backend,
+        device=str(raw.get("device", "")),
+        threads=_as_int(raw.get("threads", 0), "detector.threads", 0),
+    )
+
+
 def parse_config(data: Any) -> Config:
     if not isinstance(data, dict):
         raise ConfigError("cameras.yml must be a mapping at the top level")
@@ -148,6 +230,7 @@ def parse_config(data: Any) -> Config:
     if not isinstance(defaults, dict):
         raise ConfigError("defaults must be a mapping")
     base_record = _record_settings(defaults.get("record"), RecordSettings(), "defaults.record")
+    base_detect = _detect_settings(defaults.get("detect"), DetectSettings(), "defaults.detect")
 
     storage_raw = data.get("storage") or {}
     if not isinstance(storage_raw, dict):
@@ -197,12 +280,14 @@ def parse_config(data: Any) -> Config:
             main=streams["main"],
             sub=streams.get("sub"),
             record=_record_settings(raw.get("record"), base_record, f"{where}.record"),
+            detect=_detect_settings(raw.get("detect"), base_detect, f"{where}.detect"),
         )
 
     mqtt = data.get("mqtt") or {}
     return Config(
         cameras=cameras,
         storage=storage,
+        detector=_detector_settings(data.get("detector")),
         go2rtc_url=str(data.get("go2rtc_url", "rtsp://go2rtc:8554")),
         mqtt_host=str(mqtt.get("host", "mosquitto")),
         mqtt_port=_as_int(mqtt.get("port", 1883), "mqtt.port", 1),

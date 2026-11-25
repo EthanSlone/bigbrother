@@ -36,17 +36,28 @@ def draw_box(img: np.ndarray, box, color, text: str | None = None, thickness: in
         cv2.putText(img, text, (x1 + 2, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (20, 20, 20), 1, cv2.LINE_AA)
 
 
-def render_live(view) -> bytes | None:
-    if view.frame is None:
-        return None
-    img = view.frame.copy()
-    for b in view.motion:
-        draw_box(img, b, RED, thickness=1)
-    for t in view.tracks:
-        if t["missed"]:
-            continue  # not seen on the latest check: don't draw where it *was*
-        color = GREY if t["stationary"] else GREEN if t["confirmed"] else YELLOW
-        draw_box(img, t["box"], color, f"#{t['id']} {t['label']} {t['score']:.2f}")
+MAX_PREDICT = 0.6  # seconds a box may be moved forward along its velocity
+
+
+def predict_box(t: dict, frame_ts: float) -> list[float]:
+    """Move a box along its velocity to the preview frame's time, so it stays on the object
+    between analyses."""
+    if t["stationary"]:
+        return t["box"]
+    dt = min(max(frame_ts - t["seen_ts"], 0.0), MAX_PREDICT)
+    return [b + v * dt for b, v in zip(t["box"], t["velocity"])]
+
+
+def render_live(image: np.ndarray, frame_ts: float, view) -> bytes | None:
+    img = image.copy()
+    if frame_ts - view.ts < 2.0:  # overlay only while analysis is current
+        for b in view.motion:
+            draw_box(img, b, RED, thickness=1)
+        for t in view.tracks:
+            if t["missed"]:
+                continue  # not seen on the latest check: don't draw where it *was*
+            color = GREY if t["stationary"] else GREEN if t["confirmed"] else YELLOW
+            draw_box(img, predict_box(t, frame_ts), color, f"#{t['id']} {t['label']} {t['score']:.2f}")
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
     return buf.tobytes() if ok else None
 
@@ -98,13 +109,29 @@ async function stats(){
     if(!el){el=document.createElement('div');el.className='cam';el.id='cam-'+c.camera;
       el.innerHTML=`<img alt="${esc(c.name)}"><div class="meta"></div><div class="err"></div>`;camsEl.appendChild(el);}
     el.querySelector('.meta').innerHTML=`<b>${esc(c.name)}</b><span class="state-${esc(c.state)}">${esc(c.state)}</span>`+
-      `<span>in <b>${c.fps_in}</b> fps</span><span>processed <b>${c.fps_processed}</b></span><span>detect <b>${c.detect_fps}</b> fps</span><span>model <b>${c.infer_ms??'-'}</b> ms</span>`+
+      `<span>preview <b class="vfps">${(viewFps[c.camera]||0).toFixed(1)}</b> fps</span><span>analysed <b>${c.fps_analysed}</b></span><span>detect <b>${c.detect_fps}</b> fps</span><span>model <b>${c.infer_ms??'-'}</b> ms</span>`+
       `<span>events <b>${c.events_started}</b></span><span>filtered <b>${c.filtered}</b></span><span>skipped <b>${c.skipped_frames}</b></span>`;
     el.querySelector('.err').textContent=c.error||'';
+    if(!loops[c.camera]){loops[c.camera]=true;liveLoop(c.camera,el.querySelector('img'));}
   }
 }
-function live(){for(const img of camsEl.querySelectorAll('.cam img')){const id=img.parentElement.id.slice(4);
-  const n=new Image();n.onload=()=>{img.src=n.src};n.src=`live/${id}.jpg?t=${Date.now()}`;}}
+const loops={},viewFps={},sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function liveLoop(id,img){
+  let seq=0,shown=[];
+  for(;;){
+    if(document.hidden){await sleep(500);continue;}
+    try{
+      const r=await fetch(`live/${id}.jpg?after=${seq}`,{cache:'no-store'});
+      if(r.status!==200){await sleep(r.status===204?50:1000);continue;}
+      seq=+r.headers.get('X-Seq')||0;
+      const url=URL.createObjectURL(await r.blob()),old=img.src;
+      await new Promise(res=>{img.onload=img.onerror=res;img.src=url;});
+      if(old.startsWith('blob:'))URL.revokeObjectURL(old);
+      const now=performance.now();shown.push(now);shown=shown.filter(t=>now-t<2000);
+      viewFps[id]=shown.length/2;
+    }catch(e){await sleep(1000);}
+  }
+}
 const fmtDur=(a,b)=>{const s=Math.round(((b??Date.now()/1000))-a);return s<60?s+'s':Math.floor(s/60)+'m '+(s%60)+'s'};
 async function events(){
   const ev=await (await fetch('api/events?limit=40')).json();
@@ -114,7 +141,7 @@ async function events(){
    `<td>${e.end_ts?'':'<span class="tag live">in view</span>'} ${e.stationary?'<span class="tag">stationary</span>':''}</td></tr>`).join('');
 }
 evEl.addEventListener('click',e=>{if(e.target.tagName==='IMG'){document.getElementById('big').src=e.target.src;document.getElementById('dlg').showModal();}});
-stats().then(live);setInterval(stats,2000);setInterval(live,400);events();setInterval(events,3000);
+stats();setInterval(stats,2000);events();setInterval(events,3000);
 </script></body></html>"""
 
 
@@ -125,9 +152,11 @@ def start_viewer(workers, store: EventStore, data_dir: Path, port: int) -> Threa
         def log_message(self, fmt, *args):  # quiet: the page polls constantly
             pass
 
-        def _send(self, code: int, body: bytes, ctype: str) -> None:
+        def _send(self, code: int, body: bytes, ctype: str, headers: dict | None = None) -> None:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -150,9 +179,19 @@ def start_viewer(workers, store: EventStore, data_dir: Path, port: int) -> Threa
                     cam = q.get("camera", [None])[0]
                     return self._json([e.to_dict() for e in store.recent(limit, cam)])
                 if path.startswith("/live/") and path.endswith(".jpg"):
+                    # Long-poll: wait (briefly) for a frame newer than ?after=, so the page
+                    # receives each decoded frame once, at the decoder's pace.
                     w = by_id.get(path[len("/live/"):-4])
-                    body = render_live(w.view) if w else None
-                    return self._send(200, body, "image/jpeg") if body else self._send(404, b"", "text/plain")
+                    if not w:
+                        return self._send(404, b"", "text/plain")
+                    after = int(parse_qs(url.query).get("after", ["0"])[0] or 0)
+                    frame = w.source.wait_frame(after, timeout=1.0)
+                    if frame is None:
+                        return self._send(204, b"", "text/plain")
+                    body = render_live(frame.image, frame.ts, w.view)
+                    if not body:
+                        return self._send(500, b"", "text/plain")
+                    return self._send(200, body, "image/jpeg", {"X-Seq": str(frame.seq)})
                 if path.startswith("/snapshot/") and path.endswith(".jpg"):
                     e = store.get(path[len("/snapshot/"):-4])  # id looked up in the DB, never used as a path
                     if e and e.snapshot:

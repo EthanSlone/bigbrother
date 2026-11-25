@@ -72,6 +72,7 @@ class FrameSource:
         self.state = "starting"
         self.error = ""
         self.frames_in = 0
+        self._recent: collections.deque[float] = collections.deque(maxlen=60)  # arrival times
         self._stop = threading.Event()
         self._cond = threading.Condition()
         self._frame: Frame | None = None
@@ -98,6 +99,13 @@ class FrameSource:
             )
             f = self._frame
         return f if f is not None and f.seq > after_seq else None
+
+    def measured_fps(self) -> float:
+        """Decoded frames per second over the last few seconds (0 if stalled)."""
+        r = list(self._recent)
+        if len(r) < 2 or time.monotonic() - r[-1] > 2:
+            return 0.0
+        return round((len(r) - 1) / (r[-1] - r[0]), 2)
 
     def _run(self) -> None:
         backoff, seq = 2.0, 0
@@ -130,6 +138,7 @@ class FrameSource:
                     break  # ffmpeg exited or stream ended
                 seq += 1
                 self.frames_in += 1
+                self._recent.append(time.monotonic())
                 img = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
                 with self._cond:
                     self._frame = Frame(img, time.time(), seq)

@@ -45,6 +45,7 @@ DEFAULT_LABELS = ("person", "car", "truck", "bus", "motorcycle", "bicycle", "dog
 class DetectSettings:
     enabled: bool = True
     fps: float = 5.0           # frames per second analysed (from the substream)
+    live_fps: float = 15.0     # frames per second decoded for the live preview (>= fps)
     width: int = 640           # frames wider than this are scaled down before detection
     labels: tuple[str, ...] = DEFAULT_LABELS
     min_score: float = 0.2     # weakest detection kept; below 0.5 it can only extend an existing track
@@ -183,7 +184,8 @@ def _detect_settings(raw: Any, base: DetectSettings, where: str) -> DetectSettin
         return base
     if not isinstance(raw, dict):
         raise ConfigError(f"{where} must be a mapping")
-    unknown = set(raw) - {"enabled", "fps", "width", "labels", "min_score", "threshold", "min_frames"}
+    unknown = set(raw) - {"enabled", "fps", "live_fps", "width", "labels", "min_score", "threshold",
+                          "min_frames"}
     if unknown:
         raise ConfigError(f"{where}: unknown key(s) {sorted(unknown)}")
     labels = raw.get("labels", base.labels)
@@ -192,6 +194,7 @@ def _detect_settings(raw: Any, base: DetectSettings, where: str) -> DetectSettin
     settings = DetectSettings(
         enabled=bool(raw.get("enabled", base.enabled)),
         fps=_number(raw.get("fps", base.fps), f"{where}.fps", 0.5, 30),
+        live_fps=_number(raw.get("live_fps", base.live_fps), f"{where}.live_fps", 0.5, 30),
         width=_as_int(raw.get("width", base.width), f"{where}.width", 160),
         labels=tuple(labels),
         min_score=_number(raw.get("min_score", base.min_score), f"{where}.min_score", 0.05, 0.99),

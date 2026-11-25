@@ -60,8 +60,8 @@ with snapshots. Click a snapshot to enlarge it.
 - **Grey box:** stationary (e.g. a parked car).
 - **Thin red outline:** raw motion.
 - **Per-camera numbers:**
-  - **in / processed / detect fps:** frames decoded / frames handled / frames the model
-    actually analysed. The model skips frames with no motion.
+  - **preview / analysed / detect fps:** frames shown in your browser / frames checked for
+    motion / frames the model actually ran on. The model skips frames with no motion.
   - **model ms:** time per analysis.
   - **filtered:** objects that never became events (brief or low-confidence detections).
   - **skipped:** frames dropped because the model was busy.
@@ -122,8 +122,10 @@ that way on this PC. On the Proxmox server, set `RECORDINGS_PATH` to a path on t
 
 ## How detection works
 
-1. **Decode the substream.** ffmpeg decodes each camera's substream at `fps` (default 5)
-   frames per second, scaled to at most 640 px wide.
+1. **Decode the substream.** ffmpeg decodes each camera's substream at `live_fps` (default
+   15) frames per second, scaled to at most 640 px wide. The preview shows every frame.
+   Every third frame (`fps`, default 5) is analysed, and between analyses the boxes move
+   along with each object's velocity.
 2. **Check for motion.** A cheap motion check runs on every frame. The model only runs
    when something moves, while a moving object is being tracked, or every 30 s to
    re-confirm parked objects. Whole-frame changes (IR switching on, exposure jumps) count
@@ -174,6 +176,13 @@ pip install -r requirements.txt pytest
 python -m pytest -q
 ```
 Tests include a real ffmpeg segmenting run (skipped if ffmpeg isn't installed).
+
+## Privacy
+
+Nothing phones home. OpenVINO normally sends a usage event to Google Analytics whenever
+it's imported. The Docker image opts out at build time (`opt_in_out --opt_out`), and the
+detector writes the same opt-out file before loading OpenVINO. The only outbound
+connection is the one-time model download from GitHub, which is checksum-verified.
 
 ## Security
 

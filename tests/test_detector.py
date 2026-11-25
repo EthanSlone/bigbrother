@@ -246,6 +246,13 @@ def test_thread_planning_splits_cpus_between_workers():
     assert plan_threads(0, 3, cpus=4) == (1, 3)
 
 
+def test_openvino_telemetry_opt_out_written(tmp_path, monkeypatch):
+    from bigbrother.detector.models import disable_openvino_telemetry
+    monkeypatch.setenv("HOME", str(tmp_path))
+    disable_openvino_telemetry()
+    assert (tmp_path / "intel" / "openvino_telemetry").read_text() == "0"
+
+
 def test_builtin_models_have_checksums():
     for info in BUILTIN.values():
         assert len(info.sha256) == 64 and info.url.startswith("https://")

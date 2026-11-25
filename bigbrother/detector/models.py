@@ -51,10 +51,28 @@ class Backend(Protocol):
     def infer(self, tensor: np.ndarray) -> np.ndarray: ...
 
 
+def disable_openvino_telemetry() -> None:
+    """Opt out of OpenVINO's usage telemetry before it is imported.
+
+    `import openvino` sends a usage event to Google Analytics unless a consent
+    file says "0" (the same file Intel's `opt_in_out --opt_out` writes). A
+    camera system has no business phoning home, so we write it ourselves. The
+    Docker image also opts out at build time.
+    """
+    consent = Path.home() / "intel" / "openvino_telemetry"
+    try:
+        if not consent.exists() or consent.read_text().strip() != "0":
+            consent.parent.mkdir(parents=True, exist_ok=True)
+            consent.write_text("0")
+    except OSError as exc:
+        log.warning("could not write OpenVINO telemetry opt-out (%s)", exc)
+
+
 class OpenVINOBackend:
     """Intel CPUs (and Intel GPUs). Default for the R730xd today."""
 
     def __init__(self, model_path: Path, device: str = "CPU", threads: int = 0):
+        disable_openvino_telemetry()
         import openvino as ov
 
         core = ov.Core()

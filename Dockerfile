@@ -10,7 +10,9 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# OpenVINO sends usage telemetry on import unless opted out, so opt out at build time.
+RUN pip install --no-cache-dir -r requirements.txt \
+ && opt_in_out --opt_out
 COPY bigbrother ./bigbrother
 
 # tini forwards SIGTERM so ffmpeg can close its last segment cleanly.

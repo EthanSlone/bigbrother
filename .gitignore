@@ -1,0 +1,19 @@
+# Secrets and local config
+.env
+config/cameras.yml
+config/generated/
+
+# Media and data
+*.mp4
+*.db
+*.db-wal
+*.db-shm
+recordings/
+data/
+models/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/

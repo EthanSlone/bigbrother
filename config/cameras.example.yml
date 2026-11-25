@@ -1,0 +1,41 @@
+# BigBrother camera config.
+# Copy to config/cameras.yml and edit. Passwords never go here: reference
+# variables from .env as ${NAME}. After editing, run:
+#   docker compose run --rm tools configure
+
+# Defaults applied to every camera (each camera can override).
+defaults:
+  record:
+    enabled: true
+    audio: false          # true = record audio (G.711 is converted to AAC)
+    segment_seconds: 60   # length of each recording file
+
+storage:
+  retention_days: 30      # delete recordings older than this
+  max_usage_percent: 90   # if the disk passes this, delete oldest first
+
+# Camera ids: lowercase letters, digits, underscores (e.g. front_door).
+# Annke cameras are Hikvision-based. The usual RTSP paths are:
+#   main stream: /Streaming/Channels/101
+#   substream:   /Streaming/Channels/102
+# Some older Annke firmware uses /H264/ch1/main/av_stream and /H264/ch1/sub/av_stream.
+cameras:
+  front_door:
+    name: Front Door
+    streams:
+      main: rtsp://${CAM_USER}:${CAM_PASSWORD}@192.168.1.101:554/Streaming/Channels/101
+      sub: rtsp://${CAM_USER}:${CAM_PASSWORD}@192.168.1.101:554/Streaming/Channels/102
+
+  driveway:
+    name: Driveway
+    streams:
+      main: rtsp://${CAM_USER}:${CAM_PASSWORD}@192.168.1.102:554/Streaming/Channels/101
+      sub: rtsp://${CAM_USER}:${CAM_PASSWORD}@192.168.1.102:554/Streaming/Channels/102
+    record:
+      retention_days: 60  # example per-camera override
+
+  # backyard:
+  #   name: Backyard
+  #   streams:
+  #     main: rtsp://${CAM_USER}:${CAM_PASSWORD}@192.168.1.103:554/Streaming/Channels/101
+  #     sub: rtsp://${CAM_USER}:${CAM_PASSWORD}@192.168.1.103:554/Streaming/Channels/102

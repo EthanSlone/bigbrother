@@ -1,0 +1,53 @@
+name: bigbrother
+
+# Phase 1 stack: stream hub, event bus, recorder.
+# First run:   docker compose run --rm tools configure
+# Then:        docker compose up -d --build
+
+services:
+  go2rtc:
+    image: alexxit/go2rtc:1.9.14
+    restart: unless-stopped
+    env_file: .env            # go2rtc expands ${CAM_PASSWORD} etc. itself
+    volumes:
+      - ./config/generated:/config
+    ports:
+      # Local-only for testing (web UI + RTSP for VLC). Never forward these.
+      - "127.0.0.1:1984:1984"
+      - "127.0.0.1:8554:8554"
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    volumes:
+      - ./config/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt-data:/mosquitto/data
+    # No ports published: internal bus only for now.
+
+  recorder:
+    build: .
+    image: bigbrother:dev
+    command: ["recorder"]
+    restart: unless-stopped
+    environment:
+      BB_LOG_LEVEL: ${BB_LOG_LEVEL:-INFO}
+    volumes:
+      - ./config:/config:ro
+      - ${RECORDINGS_PATH:-recordings}:/recordings
+      - data:/data
+    depends_on: [go2rtc, mosquitto]
+    stop_grace_period: 30s    # time for ffmpeg to close its last segment
+
+  # One-off commands: `docker compose run --rm tools configure|probe`
+  tools:
+    build: .
+    image: bigbrother:dev
+    profiles: ["tools"]
+    env_file: .env
+    volumes:
+      - ./config:/config
+
+volumes:
+  recordings:
+  data:
+  mqtt-data:

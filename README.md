@@ -29,21 +29,35 @@ Open **http://<server>:8090** (set `WEB_PORT` in `.env` to change it).
   ```bash
   docker compose logs web | grep "setup code"
   ```
-- **Accounts:** add more, or reset a forgotten password, from the server:
+- **People:** an admin adds everyone else under **Settings → People**. **Members** watch,
+  review events, keep events and turn alerts on and off; **admins** can also change
+  settings, delete events and manage people. If you're locked out, use the server:
   ```bash
-  docker compose exec -it web python -m bigbrother user add NAME
+  docker compose exec -it web python -m bigbrother user add NAME      # first one is an admin
   docker compose exec -it web python -m bigbrother user passwd NAME
+  docker compose exec web python -m bigbrother user role NAME admin|member
+  docker compose exec web python -m bigbrother user reset-2fa NAME    # lost phone
   docker compose exec web python -m bigbrother user list
   ```
+- **Two-factor sign-in:** under **Settings → Your account**, anyone can turn it on with an
+  authenticator app (Google or Microsoft Authenticator, 1Password, Authy…). You get 8
+  one-time recovery codes for when your phone is lost. Recommended once the app is
+  reachable from the internet. The same page lists where you're signed in and can sign
+  out every other device.
 - **Live:** video comes straight from go2rtc (MSE, with HLS for older iPhones) through the
   app's own connection, so it needs no extra ports and shares the login. The grid uses the
   substreams; opening a camera plays its main stream. Tiles that are off screen or in a
   background tab stop streaming.
 - **Events:** filter by camera, object, alert outcome and day. Each event has its snapshot,
-  a clip with 5 s before and after, and why an alert was or wasn't sent.
+  a clip with 5 s before and after, and why an alert was or wasn't sent. The Events button
+  counts what's new since you last looked (per person), and new events are marked.
+  **Keep** (the star) holds an event past `storage.event_retention_days` until you unstar
+  it. Admins can delete an event; its snapshot and saved clip go with it, the recording
+  stays.
 - **Recordings:** a day timeline per camera (24 h, 6 h or 1 h). Click or drag to play from
   any moment; playback continues across the 1-minute files and skips gaps. "Save 5 minutes"
-  downloads an MP4.
+  downloads an MP4. **All cameras** plays every camera side by side on one clock, at 1×
+  to 8×; select a camera to watch it alone from the same moment.
 - **Phone:** in Safari or Chrome, use "Add to Home Screen". It opens full screen like an app.
 
 **Behind your reverse proxy:** point it at port 8090, with WebSocket upgrades allowed
@@ -290,12 +304,15 @@ and notifies:
      tries up to 3 times.
 3. **Notification:**
    - Pushover delivers it to iPhone and Android, with the full-res picture and the
-     object boxed.
-   - It's sent once per event.
+     object boxed, to everyone who follows that camera.
+   - It's sent once per event, and **once per visit**: the same kind of object on another
+     camera within `alerts.group_seconds` (90 s) is recorded as "Same visit" instead of a
+     second notification. This is tracked per person, so someone who only follows the
+     front door still hears about the visitor who came up the driveway.
    - A 4xx error is never retried, as Pushover asks. Server errors are retried after 5 s.
 
 **Every event gets an outcome**, shown in the viewer's *Alert* column:
-- **sent**, **logged** (no Pushover keys set) or **failed**,
+- **sent**, **logged** (Pushover not set up yet), **failed** or **same visit**,
 - or **not sent**, with the reason. For example: "cooldown: a person alert was sent 14s ago",
   "hasn't entered porch", "second opinion found no person", or "disarmed".
 
@@ -304,13 +321,24 @@ Click an alert badge to see the exact picture that was sent.
 **Arm or disarm** with the lamp at the top of the app, or over MQTT: publish `on` or
 `off` to `bigbrother/alerts/armed/set`. The state is published to `bigbrother/alerts/armed`.
 
+**Automatically:** under **Settings → Alerts**, set the hours alerts should be on
+(`alerts.arm_schedule`, e.g. overnight and weekdays 9 to 5). Alerts turn on at each
+window's start and off at its end. Only those moments act, so the lamp still works in
+between: turn alerts off by hand and they stay off until the next start.
+
 **Set up Pushover:**
-1. Create an account at pushover.net and install the app on your phone (30-day free
-   trial).
-2. Create an Application on pushover.net.
-3. Put your user key and the app token in `.env` as `PUSHOVER_USER` / `PUSHOVER_TOKEN`.
-4. Run `docker compose up -d alerter`.
-5. Check it with `docker compose run --rm tools test-alert`.
+1. Admin: create an Application named BigBrother on pushover.net and paste its API token
+   under **Settings → Alerts**.
+2. Everyone who wants alerts: install the Pushover app (one-time purchase after a 30-day
+   trial), then under **Settings → Your account → Phone alerts** paste your user key from
+   pushover.net, pick your cameras, and press **Send me a test**. Keys are checked with
+   Pushover before they're saved.
+3. Optional: set **Address of this app from outside** under Settings → Alerts so each
+   alert has a "View clip" link.
+
+`PUSHOVER_TOKEN` and `PUSHOVER_USER` in `.env` still work: the token is used when none is
+set in the app, and that user key gets every alert. `docker compose run --rm tools
+test-alert` sends a test to everyone set up.
 
 The verifier model, YOLOX-m (~100 MB), downloads on first start.
 
@@ -396,6 +424,10 @@ The app:
   in HttpOnly SameSite cookies (Secure behind HTTPS).
 - Failed logins are limited to 10 per client and 10 per username per 15 minutes. Signed-in
   devices stay signed in during a lockout. Changing a password signs out every other device.
+- Two-factor sign-in uses standard 6-digit codes (TOTP, RFC 6238); a code can't be used
+  twice, and recovery codes are stored hashed and work once.
+- Members can't reach settings, accounts, event deletion or test-set exports; the server
+  enforces this, not just the screens.
 - Every request except the login page and static files needs a session; that includes
   video, snapshots, clips and the live stream. Requests that change something need a custom
   header, which blocks cross-site request forgery. Live-stream WebSockets must come from

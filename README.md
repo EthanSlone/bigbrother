@@ -39,11 +39,16 @@ Open **http://<server>:8090** (set `WEB_PORT` in `.env` to change it).
   docker compose exec web python -m bigbrother user reset-2fa NAME    # lost phone
   docker compose exec web python -m bigbrother user list
   ```
-- **Two-factor sign-in:** under **Settings → Your account**, anyone can turn it on with an
-  authenticator app (Google or Microsoft Authenticator, 1Password, Authy…). You get 8
-  one-time recovery codes for when your phone is lost. Recommended once the app is
-  reachable from the internet. The same page lists where you're signed in and can sign
-  out every other device.
+- **Two-factor sign-in:** required for admins by default (**Settings → People** can make it
+  required for everyone, or optional). Anyone required who hasn't set it up is taken
+  through setup right after their password: an authenticator app (Google or Microsoft
+  Authenticator, 1Password, Authy…), then 8 one-time recovery codes for a lost phone.
+  Codes are only asked for when signing in on a new device. **Move to a new phone** under
+  Your account needs the password. The same page lists where you're signed in and can
+  sign out every other device.
+- **Staying signed in:** with "Keep me signed in", a device stays signed in as long as it
+  opens BigBrother at least once every 30 days. Use the same address at home and away
+  (each address signs in separately).
 - **Live:** video comes straight from go2rtc (MSE, with HLS for older iPhones) through the
   app's own connection, so it needs no extra ports and shares the login. The grid uses the
   substreams; opening a camera plays its main stream. Tiles that are off screen or in a
@@ -58,7 +63,9 @@ Open **http://<server>:8090** (set `WEB_PORT` in `.env` to change it).
   any moment; playback continues across the 1-minute files and skips gaps. "Save 5 minutes"
   downloads an MP4. **All cameras** plays every camera side by side on one clock, at 1×
   to 8×; select a camera to watch it alone from the same moment.
-- **Phone:** in Safari or Chrome, use "Add to Home Screen". It opens full screen like an app.
+- **Phone:** install it as an app. Android: the app offers **Install BigBrother** (or Chrome's
+  ⋮ menu → Install app). iPhone: Safari → Share → Add to Home Screen. It opens full screen
+  from its own icon, with shortcuts to Events and all-camera Recordings.
 
 **Behind your reverse proxy:** point it at port 8090, with WebSocket upgrades allowed
 (needed for live video). Put the proxy's IP in `TRUSTED_PROXIES` in `.env` so login rate

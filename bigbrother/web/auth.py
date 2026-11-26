@@ -62,6 +62,10 @@ MIN_PASSWORD = 10
 SESSION_DAYS = 30            # "remember me"
 SHORT_SESSION_HOURS = 12     # browser session
 TOUCH_EVERY = 300            # seconds between last-seen updates
+# Who must use two-factor sign-in. Someone required who hasn't set it up is taken through
+# setup right after their password, and can't do anything else until it's done.
+REQUIRE_2FA = ("admins", "everyone", "off")
+REQUIRE_2FA_DEFAULT = "admins"
 
 # scrypt cost: ~50-100 ms per hash on a server core; memory 32 MB.
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2**15, 8, 1
@@ -128,6 +132,7 @@ class Session:
     token_hash: str
     expires_ts: float
     persistent: bool
+    touched: bool = False   # expiry was just moved forward: renew the browser's cookie too
 
 
 class UserStore:
@@ -142,6 +147,27 @@ class UserStore:
         for name, decl in USER_COLUMNS.items():
             if name not in cols:
                 self._db.execute(f"ALTER TABLE users ADD COLUMN {name} {decl}")
+        self._db.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        row = self._db.execute("SELECT value FROM app_settings WHERE key = 'require_2fa'").fetchone()
+        self._require_2fa = row[0] if row and row[0] in REQUIRE_2FA else REQUIRE_2FA_DEFAULT
+
+    # -- two-factor policy -----------------------------------------------------------
+    @property
+    def require_2fa(self) -> str:
+        return self._require_2fa
+
+    def set_require_2fa(self, value: str) -> None:
+        if value not in REQUIRE_2FA:
+            raise AuthError("Choose admins, everyone or off.")
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('require_2fa', ?)", (value,))
+        self._require_2fa = value
+
+    def twofa_required(self, role: str) -> bool:
+        return self._require_2fa == "everyone" or (self._require_2fa == "admins" and role == "admin")
+
+    def must_enroll(self, user: User) -> bool:
+        return not user.twofa and self.twofa_required(user.role)
 
     _USER_SQL = "SELECT id, username, role, totp_secret IS NOT NULL FROM users"
 
@@ -345,12 +371,13 @@ class UserStore:
             if expires < now:
                 self._db.execute("DELETE FROM sessions WHERE token_hash = ?", (th,))
                 return None
-            if now - last_seen > TOUCH_EVERY:
+            touched = now - last_seen > TOUCH_EVERY
+            if touched:
                 ttl = SESSION_DAYS * 86400 if persistent else SHORT_SESSION_HOURS * 3600
                 expires = now + ttl
                 self._db.execute("UPDATE sessions SET last_seen_ts = ?, expires_ts = ? WHERE token_hash = ?",
                                  (now, expires, th))
-        return Session(User(uid, name, role, bool(twofa)), th, expires, bool(persistent))
+        return Session(User(uid, name, role, bool(twofa)), th, expires, bool(persistent), touched)
 
     def end_session(self, token: str | None) -> None:
         if token:

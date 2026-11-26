@@ -80,6 +80,12 @@ def test_setup_code_compare():
 
 # -- the app ------------------------------------------------------------------------
 
+def _users(tmp_path):
+    users = UserStore(tmp_path / "web.db")
+    users.set_require_2fa("off")   # most tests aren't about two-factor; test_required_two_factor is
+    return users
+
+
 def _ctx(tmp_path):
     from bigbrother.alerts_db import AlertStore
     from bigbrother.playback import Playback
@@ -91,7 +97,7 @@ def _ctx(tmp_path):
     db = tmp_path / "bb.db"
     (tmp_path / "rec").mkdir()
     ctx = WebContext(cfg=cfg, data_dir=tmp_path, recordings_root=tmp_path / "rec",
-                     users=UserStore(tmp_path / "web.db"), queries=EventQueries(db), alerts=AlertStore(db),
+                     users=_users(tmp_path), queries=EventQueries(db), alerts=AlertStore(db),
                      detector_url="http://127.0.0.1:9", setup_code="ABCD-EFGH", db_path=db)
     ctx.playback = Playback(RecordingIndex(db), tmp_path / "rec", tmp_path, EventStore(db), {"front": 60})
     return ctx
@@ -111,7 +117,8 @@ def test_api_requires_login_and_setup_code(tmp_path):
             assert (await c.get("/media/snapshot/x.jpg")).status == 401
             assert (await c.get("/")).status == 200                      # app shell is public
             s = await (await c.get("/api/session")).json()
-            assert s == {"user": None, "role": None, "twofa": False, "setup": True, "version": s["version"]}
+            assert s == {"user": None, "role": None, "twofa": False, "setup": True, "version": s["version"],
+                         "must_enroll": False, "twofa_required": False}
             body = {"code": "WRONG-CODE", "username": "ethan", "password": PW}
             assert (await c.post("/api/setup", json=body)).status == 403            # no header
             assert (await c.post("/api/setup", json=body, headers=H)).status == 403  # wrong code
@@ -477,3 +484,53 @@ def test_new_events_keep_and_delete(tmp_path):
     _run(go())
     assert not (tmp_path / "snaps" / "x.jpg").exists() and not (tmp_path / "alerts" / "x.jpg").exists()
     assert ctx.alerts.get("x") is None
+
+
+def test_required_two_factor_and_cookie_renewal(tmp_path):
+    import time as _t
+    from bigbrother.web.app import create_app
+    from bigbrother.web.auth import _hotp
+    ctx = _ctx(tmp_path)
+    assert UserStore(tmp_path / "x.db").require_2fa == "admins"     # default for new installs
+    ctx.users.set_require_2fa("admins")
+    ctx.users.add("ethan", PW, "admin")
+    ctx.users.add("sam", PW, "member")
+
+    async def go():
+        async with TestClient(TestServer(create_app(ctx))) as admin, TestClient(TestServer(create_app(ctx))) as kid:
+            await admin.post("/api/login", json={"username": "ethan", "password": PW}, headers=H)
+            s = await (await admin.get("/api/session")).json()
+            assert s["must_enroll"] and s["twofa_required"]
+            r = await admin.get("/api/events")
+            assert r.status == 403 and (await r.json())["enroll"]
+            assert r.headers["Cache-Control"] == "no-store"
+            # members aren't required at "admins"
+            await kid.post("/api/login", json={"username": "sam", "password": PW}, headers=H)
+            assert (await kid.get("/api/events")).status == 200
+            # setup is allowed, and then everything opens up
+            b = await (await admin.post("/api/me/2fa/begin", headers=H)).json()
+            step = int(_t.time() // 30)
+            r = await admin.post("/api/me/2fa/confirm", json={"code": _hotp(b["secret"], step)}, headers=H)
+            assert r.status == 200
+            assert (await admin.get("/api/events")).status == 200
+            # required: can't be turned off; moving to a new phone needs the password
+            r = await admin.post("/api/me/2fa/disable", json={"password": PW}, headers=H)
+            assert r.status == 400 and "new phone" in (await r.json())["error"]
+            assert (await admin.post("/api/me/2fa/begin", json={"password": "nope"}, headers=H)).status == 403
+            assert (await admin.post("/api/me/2fa/begin", json={"password": PW}, headers=H)).status == 200
+            # policy: admins only can change it; "everyone" catches sam on his next request
+            assert (await kid.put("/api/security", json={"require_2fa": "off"}, headers=H)).status == 403
+            r = await admin.put("/api/security", json={"require_2fa": "everyone"}, headers=H)
+            assert (await r.json())["require_2fa"] == "everyone"
+            assert (await kid.get("/api/events")).status == 403
+            users = await (await admin.get("/api/users")).json()
+            assert {u["username"]: (u["twofa"], u["twofa_required"]) for u in users} == \
+                {"ethan": (True, True), "sam": (False, True)}
+            # a "keep me signed in" session renews its cookie as it's used
+            ctx.users._db.execute("UPDATE sessions SET last_seen_ts = last_seen_ts - 3600")
+            r = await admin.get("/api/events")
+            assert "bb_session" in r.cookies and r.cookies["bb_session"]["max-age"] == str(30 * 86400)
+            r = await admin.get("/api/events")
+            assert "bb_session" not in r.cookies     # only when the session actually moved
+
+    _run(go())

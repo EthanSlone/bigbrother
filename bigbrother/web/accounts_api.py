@@ -22,7 +22,25 @@ def _err(exc: Exception, status: int = 400) -> web.Response:
 
 async def list_users(request: web.Request) -> web.Response:
     ctx = request.app[CTX]
-    return web.json_response(await asyncio.to_thread(ctx.users.overview))
+    rows = await asyncio.to_thread(ctx.users.overview)
+    for r in rows:
+        r["twofa_required"] = ctx.users.twofa_required(r["role"])
+    return web.json_response(rows)
+
+
+async def get_security(request: web.Request) -> web.Response:
+    return web.json_response({"require_2fa": request.app[CTX].users.require_2fa})
+
+
+async def set_security(request: web.Request) -> web.Response:
+    ctx = request.app[CTX]
+    body = await _json(request)
+    try:
+        await asyncio.to_thread(ctx.users.set_require_2fa, str(body.get("require_2fa", "")))
+    except AuthError as exc:
+        return _err(exc)
+    log.info("two-factor required for %s, set by %s", ctx.users.require_2fa, request[SESSION].user.username)
+    return web.json_response({"require_2fa": ctx.users.require_2fa})
 
 
 async def add_user(request: web.Request) -> web.Response:
@@ -89,6 +107,14 @@ def _qr_svg(uri: str) -> str:
 async def twofa_begin(request: web.Request) -> web.Response:
     ctx = request.app[CTX]
     me = request[SESSION].user
+    if me.twofa:   # moving to a new phone replaces the old one: prove it's really you
+        body = await _json(request) if request.can_read_body else {}
+        ip = ctx.client_ip(request)
+        if ctx.limiter.retry_after(ip, me.username) > 0:
+            return _err(AuthError("Too many failed attempts. Try again later."), 429)
+        if await asyncio.to_thread(ctx.users.authenticate, me.username, str(body.get("password", ""))) is None:
+            ctx.limiter.failed(ip, me.username)
+            return _err(AuthError("Password is wrong."), 403)
     secret = await asyncio.to_thread(ctx.users.totp_begin, me.username)
     uri = totp_uri(secret, me.username)
     return web.json_response({"secret": secret, "uri": uri, "qr": await asyncio.to_thread(_qr_svg, uri)})
@@ -113,6 +139,9 @@ async def twofa_disable(request: web.Request) -> web.Response:
     ip = ctx.client_ip(request)
     if ctx.limiter.retry_after(ip, me.username) > 0:
         return _err(AuthError("Too many failed attempts. Try again later."), 429)
+    if ctx.users.twofa_required(me.role):
+        return _err(AuthError("Two-factor sign-in is required for your account, so it can't be turned off. "
+                              "To use a new phone, choose Move to a new phone."), 400)
     if await asyncio.to_thread(ctx.users.authenticate, me.username, str(body.get("password", ""))) is None:
         ctx.limiter.failed(ip, me.username)
         return _err(AuthError("Password is wrong."), 403)
@@ -140,6 +169,8 @@ async def sign_out_others(request: web.Request) -> web.Response:
 def register(app: web.Application) -> None:
     r = app.router
     r.add_get("/api/users", list_users)
+    r.add_get("/api/security", get_security)
+    r.add_put("/api/security", set_security)
     r.add_post("/api/users", add_user)
     r.add_put("/api/users/{name}", change_user)
     r.add_delete("/api/users/{name}", delete_user)

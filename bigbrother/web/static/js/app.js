@@ -16,6 +16,7 @@ export async function api(path, {method = 'GET', body, signal} = {}) {
   let data = null;
   if ((r.headers.get('Content-Type') || '').includes('json')) data = await r.json();
   if (r.status === 401 && !path.startsWith('/api/login')) { showGate(); throw new ApiError(401, 'Signed out'); }
+  if (r.status === 403 && data && data.enroll) { showGate(); throw new ApiError(403, data.error); }
   if (!r.ok) throw new ApiError(r.status, (data && data.error) || `Request failed (${r.status})`);
   return data;
 }
@@ -102,7 +103,22 @@ async function showGate() {
   const root = $('#root');
   root.innerHTML = `<div class="gate"><div class="scene">${SCENE}</div><main class="gate-main">
       <div class="wordmark">${MARK}<span>BigBrother</span></div><div id="gate-step"></div></main></div>`;
-  if (s.setup) stepSetup(); else stepSignIn();
+  if (s.setup) stepSetup(); else if (s.user && s.must_enroll) stepEnroll(s); else stepSignIn();
+}
+
+// Signed in with the password, but this account must use two-factor and hasn't set it up yet.
+async function stepEnroll(s) {
+  const el = $('#gate-step');
+  el.innerHTML = `<div class="gate-form"><div id="tf"></div><p class="error" role="alert" hidden></p>
+    <button class="btn quiet" type="button" id="gate-out">Sign out</button></div>`;
+  $('#gate-out', el).onclick = async () => { await api('/api/logout', {method: 'POST'}).catch(() => {}); showGate(); };
+  const tf = $('#tf', el);
+  try {
+    const {enrol} = await import('./twofa.js');
+    await enrol(tf, {heading: 'One more step: two-factor sign-in', onDone: start});
+    $('.tf-h', tf).insertAdjacentHTML('afterend', `<p class="tf-why">${s.role === 'member' ? 'Everyone' : 'Admin accounts'} on this BigBrother
+      must use a code from an authenticator app as well as the password. You'll only need it when signing in on a new device.</p>`);
+  } catch (ex) { const e = $('.error', el); e.textContent = ex.message; e.hidden = false; }
 }
 
 function gateForm(html, onsubmit) {
@@ -257,8 +273,8 @@ async function route() {
 let armedTimer = null;
 async function start() {
   const s = await (await fetch('/api/session')).json();
-  if (!s.user) return showGate();
-  state.user = s.user; state.role = s.role; state.twofa = s.twofa;
+  if (!s.user || s.must_enroll) return showGate();
+  state.user = s.user; state.role = s.role; state.twofa = s.twofa; state.twofaRequired = s.twofa_required;
   await loadCameras();
   renderShell();
   const poll = () => api('/api/armed').then(r => {
@@ -270,6 +286,40 @@ async function start() {
   armedTimer = setInterval(() => { if (!document.hidden) poll(); }, 20000);
   if (!location.hash) history.replaceState(null, '', '#/live');
   route();
+}
+
+// Installing as an app (Android Chrome, desktop Chrome/Edge): Chrome offers it through this
+// event. Keep it for the install button, and offer it once in a small banner.
+export let installPrompt = null;
+const standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+export const isInstalled = standalone;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  installPrompt = e;
+  let dismissed = false;
+  try { dismissed = localStorage.getItem('bb.install.dismissed') === '1'; } catch { /* private mode */ }
+  if (!dismissed && state.user && !$('.install-banner')) showInstallBanner();
+});
+window.addEventListener('appinstalled', () => { installPrompt = null; const b = $('.install-banner'); if (b) b.remove(); });
+export async function promptInstall() {
+  if (!installPrompt) return false;
+  installPrompt.prompt();
+  const {outcome} = await installPrompt.userChoice;
+  installPrompt = null;
+  return outcome === 'accepted';
+}
+function showInstallBanner() {
+  const b = document.createElement('div');
+  b.className = 'install-banner'; b.setAttribute('role', 'region'); b.setAttribute('aria-label', 'Install the app');
+  b.innerHTML = `<span class="mk">${MARK}</span><span class="t"><b>Install BigBrother</b><span>Opens like an app, and stays signed in.</span></span>
+    <button class="btn primary" type="button" data-a="install">Install</button><button class="btn quiet" type="button" data-a="later">Not now</button>`;
+  b.onclick = async e => {
+    const a = e.target.closest('button'); if (!a) return;
+    if (a.dataset.a === 'install') await promptInstall();
+    else { try { localStorage.setItem('bb.install.dismissed', '1'); } catch { /* fine */ } }
+    b.remove();
+  };
+  document.body.appendChild(b);
 }
 
 window.addEventListener('hashchange', route);

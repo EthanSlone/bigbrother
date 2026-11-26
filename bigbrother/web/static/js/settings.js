@@ -1,4 +1,4 @@
-import {$, $$, api, esc, state, go, toast, labelName, loadCameras, camName, ICON, isAdmin} from './app.js';
+import {$, $$, api, esc, state, go, toast, labelName, loadCameras, camName, ICON, isAdmin, promptInstall, isInstalled, installPrompt} from './app.js';
 
 // admin: only admins see the section (the server enforces it too).
 export const SECTIONS = {
@@ -602,13 +602,17 @@ const ago = ts => {
   return m < 2 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
 };
 async function renderUsers(panel) {
-  let users;
-  try { users = await api('/api/users'); } catch { return; }
+  let users, sec;
+  try { [users, sec] = await Promise.all([api('/api/users'), api('/api/security')]); } catch { return; }
   panel.innerHTML = `<h2>People</h2>
     <p>Everyone in the house can have their own sign-in. Members can watch, review events and turn alerts on and off;
       only admins can change settings or manage people.</p>
+    <form class="form" id="policy"><label class="field">Two-factor sign-in is required for
+      <select name="require">${[['admins', 'Admins (recommended at least)'], ['everyone', 'Everyone'], ['off', 'Nobody: it\'s optional']].map(([v, t]) =>
+        `<option value="${v}" ${sec.require_2fa === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <p class="hint muted">Anyone required who hasn't set it up is taken through setup right after their password, on their next visit.</p></form>
     <div class="rows">${users.map(u => `<div class="row"><div class="t"><b>${esc(u.username)}${u.username === state.user ? ' (you)' : ''}</b>
-        <span>${u.role === 'admin' ? 'Admin' : 'Member'}. ${u.twofa ? 'Two-factor on' : 'Two-factor off'}.
+        <span>${u.role === 'admin' ? 'Admin' : 'Member'}. ${u.twofa ? 'Two-factor on' : u.twofa_required ? 'Two-factor required, set up at next visit' : 'Two-factor off'}.
           ${u.devices ? `Signed in on ${u.devices} device${u.devices > 1 ? 's' : ''}, last active ${ago(u.last_seen)}.` : 'Not signed in anywhere.'}</span></div>
         <button class="btn" data-edit="${esc(u.username)}">Manage</button></div>`).join('')}</div>
     <form class="form" id="adduser" autocomplete="off">
@@ -621,6 +625,14 @@ async function renderUsers(panel) {
       <div><button class="btn primary" type="submit">Add person</button></div>
     </form>
     <dialog class="sheet" id="udlg" style="width:min(520px,94vw)"></dialog>`;
+  const pol = $('#policy', panel);
+  pol.require.onchange = async () => {
+    if (pol.require.value === 'off' && !confirm('Make two-factor optional for everyone? Admin accounts could then be reached with a password alone.')) {
+      pol.require.value = sec.require_2fa; return;
+    }
+    try { await api('/api/security', {method: 'PUT', body: {require_2fa: pol.require.value}}); toast('Saved'); renderUsers(panel); }
+    catch (ex) { toast(ex.message); }
+  };
   const f = $('#adduser', panel);
   f.onsubmit = async e => {
     e.preventDefault();
@@ -663,6 +675,17 @@ async function renderUsers(panel) {
 }
 
 // ---------- your account ----------
+function appSection() {
+  const ios = /iPhone|iPad/.test(navigator.userAgent);
+  const how = isInstalled() ? "<p><span class=\"dot ok\"></span>You're using the installed app.</p>"
+    : installPrompt ? '<p>Install it to open BigBrother from your home screen, full screen, like any other app.</p><div><button class="btn primary" id="install">Install BigBrother</button></div>'
+    : ios ? '<p>To get an app icon: in Safari, tap Share, then <b>Add to Home Screen</b>.</p>'
+    : '<p>To get an app icon: in Chrome, open the ⋮ menu and choose <b>Install app</b> (or <b>Add to Home screen</b>).</p>';
+  return `${how}<p class="hint muted">With "Keep me signed in", this device stays signed in as long as you open BigBrother at least once
+    every 30 days. Two-factor codes are only asked for when signing in on a new device. Always use the same address
+    (your public one) at home and away: each address signs in separately.</p>`;
+}
+
 function phoneAlerts(m) {
   const all = m.cameras == null;
   return `<form class="form" id="phone"><h3>Phone alerts</h3>
@@ -716,9 +739,13 @@ async function renderAccount(panel) {
     <section class="form" id="twofa">
       <h3>Two-factor sign-in</h3>
       ${state.twofa
-        ? `<p><span class="dot ok"></span>On. Signing in on a new device asks for a code from your authenticator app.</p>
-           <form class="form" id="off" style="gap:12px"><label class="field">Your password, to turn it off<input type="password" name="password" autocomplete="current-password" required></label>
-             <p class="error" role="alert" hidden></p><div><button class="btn" type="submit">Turn off two-factor</button></div></form>`
+        ? `<p><span class="dot ok"></span>On. Signing in on a new device asks for a code from your authenticator app.
+             ${state.twofaRequired ? 'It\'s required for your account.' : ''}</p>
+           <form class="form" id="move" style="gap:12px"><label class="field">New phone? Your password, to move two-factor to it
+             <input type="password" name="password" autocomplete="current-password" required></label>
+             <div><button class="btn" type="submit">Move to a new phone</button></div></form>
+           ${state.twofaRequired ? '' : `<form class="form" id="off" style="gap:12px"><label class="field">Your password, to turn it off<input type="password" name="password" autocomplete="current-password" required></label>
+             <p class="error" role="alert" hidden></p><div><button class="btn" type="submit">Turn off two-factor</button></div></form>`}`
         : `<p>Recommended now that BigBrother can be reached from the internet: even with your password, nobody can sign in without your phone.
              Works with any authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Authy…).</p>
            <div><button class="btn primary" id="on" type="button">Set up two-factor</button></div>`}
@@ -733,6 +760,7 @@ async function renderAccount(panel) {
       <p class="error" role="alert" hidden></p>
       <div><button class="btn primary" type="submit">Change password</button></div>
     </form>
+    <section id="app-sec"><h3>BigBrother on this device</h3>${appSection()}</section>
     <section><h3>Where you're signed in</h3>
       <div class="rows">${devices.map(d => `<div class="row"><div class="t"><b>${esc(ua(d.user_agent))}${d.current ? ' (this device)' : ''}</b>
         <span>Last active ${ago(d.last_seen)}${d.ip ? `, from ${esc(d.ip)}` : ''}</span></div><span></span></div>`).join('')}</div>
@@ -740,6 +768,8 @@ async function renderAccount(panel) {
         ${devices.length > 1 ? '<button class="btn" id="others">Sign out other devices</button>' : ''}
         <button class="btn" id="logout">Sign out here</button></div></section>`;
   if (mine) wirePhoneAlerts($('#phone', panel), mine);
+  const inst = $('#install', panel);
+  if (inst) inst.onclick = async () => { if (await promptInstall()) toast('Installed: open BigBrother from your home screen'); renderAccount(panel); };
   const pw = $('#pw', panel), err = $('.error', pw);
   pw.onsubmit = async e => {
     e.preventDefault();
@@ -759,34 +789,15 @@ async function renderAccount(panel) {
     try { await api('/api/me/2fa/disable', {method: 'POST', body: {password: off.password.value}}); state.twofa = false; toast('Two-factor sign-in is off'); renderAccount(panel); }
     catch (ex) { formError($('.error', off), ex); }
   };
-  const on = $('#on', panel);
-  if (on) on.onclick = async () => {
-    const b = await api('/api/me/2fa/begin', {method: 'POST'});
-    const sec = $('#twofa', panel);
-    sec.innerHTML = `<h3>Set up two-factor sign-in</h3>
-      <div class="enrol"><div class="qr">${b.qr}</div><div class="form" style="gap:12px">
-        <p>1. In your authenticator app, add an account and scan this code.<br>
-           On this phone? <a href="${esc(b.uri)}">Open in your authenticator app</a>, or type the key:</p>
-        <code class="key">${esc(b.secret.replace(/(.{4})/g, '$1 ').trim())}</code>
-        <form class="form" id="confirm" style="gap:12px"><label class="field">2. Enter the 6-digit code it shows
-          <input type="text" name="code" class="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required></label>
-          <p class="error" role="alert" hidden></p><div><button class="btn primary" type="submit">Turn on</button></div></form>
-      </div></div>`;
-    const cf = $('#confirm', sec);
-    $('input', cf).focus();
-    cf.onsubmit = async e => {
-      e.preventDefault();
-      try {
-        const r = await api('/api/me/2fa/confirm', {method: 'POST', body: {code: cf.code.value}});
-        state.twofa = true;
-        sec.innerHTML = `<h3>Two-factor sign-in is on</h3>
-          <p>Save these recovery codes somewhere safe (a password manager, or printed). Each one gets you in once if you lose your phone.
-            They won't be shown again.</p>
-          <div class="recovery">${r.recovery_codes.map(c => `<code>${esc(c)}</code>`).join('')}</div>
-          <div style="display:flex;gap:10px"><button class="btn" id="copy">Copy codes</button><button class="btn primary" id="done">I've saved them</button></div>`;
-        $('#copy', sec).onclick = () => navigator.clipboard.writeText(r.recovery_codes.join('\n')).then(() => toast('Copied'));
-        $('#done', sec).onclick = () => renderAccount(panel);
-      } catch (ex) { formError($('.error', cf), ex); }
-    };
+  const sec = $('#twofa', panel);
+  const run = async password => {
+    const {enrol} = await import('./twofa.js');
+    try { await enrol(sec, {password, heading: password ? 'Move two-factor to a new phone' : 'Set up two-factor sign-in',
+                           onDone: () => { state.twofa = true; renderAccount(panel); }}); }
+    catch (ex) { toast(ex.message); }
   };
+  const on = $('#on', panel);
+  if (on) on.onclick = () => run();
+  const move = $('#move', panel);
+  if (move) move.onsubmit = e => { e.preventDefault(); run(move.password.value); };
 }

@@ -308,3 +308,14 @@ code.key{font-size:var(--step-1);letter-spacing:.06em;background:var(--deck);pad
 }
 fieldset.field{border:0;padding:0;margin:0;min-width:0;display:grid;gap:10px}
 fieldset.field legend{padding:0;margin-bottom:8px;color:var(--mist);font-size:var(--step--1)}
+.tf-why{color:var(--mist);margin:0 0 14px;max-width:46ch}
+.gate-form .tf-h{font-size:var(--step-3);margin:0 0 12px;letter-spacing:-.02em;line-height:1.15}
+.gate .enrol{grid-template-columns:1fr}
+.gate .enrol .qr{justify-self:start}
+.enrol.phone{grid-template-columns:1fr}
+.install-banner{position:fixed;left:12px;right:12px;bottom:calc(76px + env(safe-area-inset-bottom));z-index:40;display:flex;align-items:center;gap:10px;
+  padding:10px 12px;background:var(--deck2);border:1px solid var(--rule);border-radius:var(--r-m);box-shadow:0 8px 28px rgba(0,0,0,.4)}
+.install-banner .mk svg{width:34px;height:34px;display:block}
+.install-banner .t{flex:1;display:grid;gap:2px;min-width:0}.install-banner .t span{color:var(--mist);font-size:var(--step--1)}
+@media (min-width:821px){.install-banner{left:auto;right:20px;bottom:20px;max-width:440px}}
+.gate-form .tf-why{margin:0 0 20px}

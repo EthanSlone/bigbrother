@@ -36,7 +36,10 @@ PUBLIC = {"/", "/index.html", "/manifest.webmanifest", "/sw.js", "/api/session",
 VERSION = "3"
 
 # What members (non-admins) can't do: change settings, manage accounts, delete events, export.
-ADMIN_ONLY_PREFIXES = ("/api/config", "/api/users", "/api/testset", "/media/testset", "/api/notify/settings")
+ADMIN_ONLY_PREFIXES = ("/api/config", "/api/users", "/api/testset", "/media/testset", "/api/notify/settings",
+                       "/api/security")
+# All someone may do while two-factor setup is required of them and not done yet.
+ENROLL_PATHS = {"/api/session", "/api/logout", "/api/me/2fa/begin", "/api/me/2fa/confirm"}
 
 
 def admin_only(method: str, path: str) -> bool:
@@ -166,10 +169,17 @@ async def require_login(request: web.Request, handler):
         origin, host = request.headers.get("Origin", ""), request.headers.get("Host", "")
         if not origin or origin.split("://", 1)[-1] != host:
             return web.json_response({"error": "cross-origin websocket refused"}, status=403)
+    if ctx.users.must_enroll(sess.user) and path not in ENROLL_PATHS:
+        return web.json_response({"error": "Set up two-factor sign-in first.", "enroll": True}, status=403)
     if admin_only(request.method, path) and not sess.user.is_admin:
         return web.json_response({"error": "Only an admin can do that."}, status=403)
     request[SESSION] = sess
-    return await handler(request)
+    resp = await handler(request)
+    # The server keeps a "keep me signed in" session alive while it's used; renew the browser's
+    # cookie with it, or the cookie would still run out 30 days after the first sign-in.
+    if sess.touched and sess.persistent and not resp.prepared and COOKIE not in resp.cookies:
+        _set_cookie(ctx, request, resp, request.cookies[COOKIE], True)
+    return resp
 
 
 # -- auth routes ------------------------------------------------------------------------
@@ -187,6 +197,8 @@ async def session_info(request: web.Request) -> web.Response:
     return web.json_response({
         "user": sess.user.username if sess else None, "role": sess.user.role if sess else None,
         "twofa": sess.user.twofa if sess else False, "setup": needs_setup, "version": VERSION,
+        "must_enroll": bool(sess) and ctx.users.must_enroll(sess.user),
+        "twofa_required": bool(sess) and ctx.users.twofa_required(sess.user.role),
     })
 
 
@@ -353,6 +365,8 @@ def create_app(ctx: WebContext) -> web.Application:
         # (a cheap 304 when unchanged) instead of guessing how long to keep it after an update.
         if request.path.startswith("/static/") and "Cache-Control" not in response.headers:
             response.headers["Cache-Control"] = "no-cache"
+        elif request.path.startswith("/api/") and "Cache-Control" not in response.headers:
+            response.headers["Cache-Control"] = "no-store"   # never kept by a proxy or the browser
     app.on_response_prepare.append(revalidate_static)
     app.router.add_get("/api/session", session_info)
     app.router.add_post("/api/login", login)

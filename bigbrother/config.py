@@ -158,6 +158,7 @@ class Config:
     mqtt_port: int = 1883
     mqtt_prefix: str = "bigbrother"
     go2rtc_api: str = "http://go2rtc:1984"
+    source_mtime: float = field(default=0.0, compare=False)  # cameras.yml's mtime when loaded
 
     def env_refs(self) -> set[str]:
         """All environment variable names referenced by stream URLs."""
@@ -521,4 +522,5 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> Config:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise ConfigError(f"{path}: invalid YAML: {exc}") from exc
-    return parse_config(data)
+    import dataclasses
+    return dataclasses.replace(parse_config(data), source_mtime=path.stat().st_mtime)

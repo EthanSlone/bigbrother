@@ -165,3 +165,90 @@ def test_login_rate_limit_and_events(tmp_path):
             assert (await c.get("/api/timeline?camera=nope")).status == 404
             assert (await c.get("/go2rtc/api/ws?src=not_a_camera")).status in (403, 404)
     _run(go())
+
+
+# -- editing cameras.yml from the app ----------------------------------------------------
+
+CAMS_YML = """\
+# my cameras (this comment must survive)
+alerts:
+  timezone: America/New_York   # local time
+cameras:
+  front:
+    name: Front
+    streams:
+      main: rtsp://${CAM_USER}:${CAM_PASSWORD}@10.0.0.2:554/Streaming/Channels/101
+      sub: rtsp://${CAM_USER}:${CAM_PASSWORD}@10.0.0.2:554/Streaming/Channels/102
+    detect:
+      fps: 4               # custom, not shown in the app
+  back:
+    name: Back
+    streams:
+      main: rtsp://10.0.0.3/1
+"""
+
+
+def test_config_editor_keeps_comments_and_validates(tmp_path):
+    from bigbrother.config import ConfigError, load_config
+    from bigbrother.web.config_edit import ConfigEditor
+
+    path = tmp_path / "cameras.yml"
+    path.write_text(CAMS_YML)
+    ed = ConfigEditor(path)
+    _, new, changed = ed.save_camera("front", {
+        "zones": {"porch": {"points": [[0.1, 0.5], [0.6, 0.5], [0.6, 0.9]], "objects": ["person"]}},
+        "detect": {"enabled": True},
+        "alert": {"zones": ["porch"], "schedule": [{"days": ["mon", "sun"], "start": "22:00", "end": "06:30"}]}})
+    assert changed == {"detector", "alerter"}               # recording isn't interrupted
+    text = path.read_text()
+    assert "# my cameras (this comment must survive)" in text and "# custom, not shown in the app" in text
+    assert 'start: "22:00"' in text                         # PyYAML would read 22:00 as a number
+    cfg = load_config(path)                                 # what the services will load
+    front = cfg.cameras["front"]
+    assert front.detect.fps == 4 and "porch" in front.zones
+    assert str(front.alert.schedule[0].start) == "22:00:00"
+    assert len(list((tmp_path / "backups").glob("*.yml"))) == 1
+
+    for bad in ({"alert": {"zones": ["nope"]}},
+                {"streams": {"main": "rtsp://admin:hunter2@10.0.0.2/101"}},   # literal password
+                {"bogus": 1}):
+        with pytest.raises(ConfigError):
+            ed.save_camera("front", bad)
+    assert load_config(path).cameras["front"].alert.zones == ("porch",)  # nothing written
+
+    _, new, changed = ed.save_camera("garage", {"name": "Garage", "streams": {"main": "rtsp://10.0.0.9/1"}},
+                                     create=True)
+    assert "go2rtc" in changed and (tmp_path / "generated" / "go2rtc.yaml").exists()
+    with pytest.raises(ConfigError):
+        ed.save_camera("garage", {"name": "Again"}, create=True)
+    with pytest.raises(ConfigError):
+        ed.save_camera("Bad Id", {"name": "x"}, create=True)
+    ed.delete_camera("garage")
+    assert "garage" not in load_config(path).cameras
+    _, _, changed = ed.save_settings({"storage": {"retention_days": 12}})
+    assert changed == {"recorder"} and load_config(path).storage.retention_days == 12
+    with pytest.raises(ConfigError):
+        ed.save_settings({"mqtt": {"host": "evil"}})
+
+
+def test_settings_api(tmp_path):
+    from bigbrother.web.app import create_app
+    ctx = _ctx(tmp_path)
+    ctx.config_path = tmp_path / "cameras.yml"
+    ctx.config_path.write_text(CAMS_YML)
+    ctx.users.add("ethan", PW)
+
+    async def go():
+        async with TestClient(TestServer(create_app(ctx))) as c:
+            await c.post("/api/login", json={"username": "ethan", "password": PW}, headers=H)
+            cfg = await (await c.get("/api/config")).json()
+            assert set(cfg["env_vars"]) == {"CAM_USER", "CAM_PASSWORD"}
+            r = await c.put("/api/config/cameras/front", json={"name": "Front door"})
+            assert r.status == 403                                     # CSRF header required
+            r = await c.put("/api/config/cameras/front", json={"name": "Front door"}, headers=H)
+            body = await r.json()
+            assert r.status == 200 and body["restarted"] == ["alerter", "detector", "recorder"]
+            assert ctx.cfg.cameras["front"].name == "Front door"      # the app uses it right away
+            r = await c.put("/api/config/cameras/front", json={"alert": {"zones": ["nope"]}}, headers=H)
+            assert r.status == 400 and "nope" in (await r.json())["error"]
+    _run(go())

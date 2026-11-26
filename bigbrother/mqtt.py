@@ -65,3 +65,24 @@ class Publisher:
             pass
         self._client.loop_stop()
         self._client.disconnect()
+
+
+
+def restart_on_config_change(pub: "Publisher", service: str, stop, loaded_mtime: float) -> None:
+    """When the app saves settings that affect `service`, stop it; Docker's restart policy
+    brings it back with the new config (a reload by restart).
+
+    The app publishes a retained `config/changed/<service>` with the new file's mtime, so a
+    service that was mid-restart when a change landed still sees it on connecting, and one
+    that already loaded that version ignores it.
+    """
+    def on_change(_topic: str, payload: bytes) -> None:
+        try:
+            mtime = float(json.loads(payload).get("mtime", 0))
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+            return
+        if mtime > loaded_mtime + 1e-6:
+            log.info("settings changed in the app: restarting %s to apply them", service)
+            stop.set()
+
+    pub.subscribe(f"config/changed/{service}", on_change)

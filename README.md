@@ -124,8 +124,8 @@ How clips are made:
 
 ### Zones and masks
 
-Click **Zones & masks** under a camera in the debug viewer, then click points on the
-image to draw shapes:
+In the app, open **Settings → Zones and masks**, pick a camera, then click on the picture
+to place corners (drag corners to adjust):
 - **Zone:** a named area like `porch` or `driveway`. You can limit a zone to certain
   objects. An object enters a zone when its ground point (bottom-centre of its box) is
   inside the zone on 2 checks in a row. Events record every zone they entered, and alert
@@ -135,9 +135,23 @@ image to draw shapes:
 - **Object mask:** detections whose ground point falls here are dropped, e.g. a statue
   that looks like a person.
 
-The editor generates the YAML. Paste it under the camera in `config/cameras.yml`, then
-run `docker compose restart detector`. Coordinates are fractions of the frame, so they
-fit any resolution.
+**Save** writes them to `config/cameras.yml` and restarts detection to apply them.
+Coordinates are fractions of the frame, so they fit any resolution. (The debug viewer's
+editor still works too: it generates YAML to paste in by hand.)
+
+### Settings in the app
+
+**Settings** edits `config/cameras.yml` for you: cameras (Hikvision/Annke, UniFi Protect,
+or any RTSP address), zones and masks, alert rules (objects, zones, cooldown, hours), and
+how long to keep recordings.
+- Every save is checked with the same rules the services use; a bad value is refused
+  with the reason and nothing is written.
+- Your comments in the file are kept, and the previous version is saved in
+  `config/backups/` (last 20).
+- Only the services a change affects restart, about 20 seconds: a zone change restarts
+  detection and alerts but never interrupts recording.
+- Passwords stay in `.env`. Cameras refer to them by variable name, e.g. `${CAM_PASSWORD}`;
+  a new variable needs adding to `.env` and `docker compose up -d`.
 
 ### Testing without cameras
 

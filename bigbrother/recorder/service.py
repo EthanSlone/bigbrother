@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from ..config import Config
-from ..mqtt import Publisher
+from ..mqtt import Publisher, restart_on_config_change
 from .ffmpeg import CameraRecorder
 from .index import RecordingIndex
 from .retention import Retention
@@ -35,6 +35,7 @@ def run(cfg: Config, recordings_root: Path, db_path: Path) -> None:
     mqtt = None
     if os.environ.get("BB_MQTT", "1") != "0":
         mqtt = Publisher(cfg.mqtt_host, cfg.mqtt_port, cfg.mqtt_prefix, "recorder")
+        restart_on_config_change(mqtt, "recorder", stop, cfg.source_mtime)
         mqtt.start()
 
     def on_state(cam_id: str, state: str, detail: str) -> None:

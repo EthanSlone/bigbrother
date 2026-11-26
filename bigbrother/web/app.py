@@ -61,6 +61,8 @@ class WebContext:
     mqtt: object = None              # Publisher or None
     status: dict = field(default_factory=dict)   # retained MQTT state: topic -> payload
     session: aiohttp.ClientSession | None = None
+    config_path: Path = Path("/config/cameras.yml")
+    editor: object = None            # ConfigEditor, created on first use
 
     # -- request helpers ------------------------------------------------------------
     def client_ip(self, request: web.Request) -> str:
@@ -275,7 +277,7 @@ async def service_worker(request: web.Request) -> web.FileResponse:
 # -- app factory --------------------------------------------------------------------------
 
 def create_app(ctx: WebContext) -> web.Application:
-    from . import api, live
+    from . import api, live, settings_api
 
     app = web.Application(middlewares=[security_headers, require_login], client_max_size=2 * 1024 * 1024)
     app[CTX] = ctx
@@ -291,6 +293,7 @@ def create_app(ctx: WebContext) -> web.Application:
     app.router.add_post("/api/password", change_password)
     api.register(app)
     live.register(app)
+    settings_api.register(app)
 
     async def on_startup(app: web.Application) -> None:
         ctx.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=5))
@@ -304,9 +307,10 @@ def create_app(ctx: WebContext) -> web.Application:
     return app
 
 
-def run(cfg: Config, data_dir: Path, db_path: Path, recordings_root: Path, port: int) -> None:
+def run(cfg: Config, data_dir: Path, db_path: Path, recordings_root: Path, port: int,
+        config_path: Path = Path("/config/cameras.yml")) -> None:
     ctx = WebContext(
-        cfg=cfg, data_dir=data_dir, recordings_root=recordings_root,
+        cfg=cfg, data_dir=data_dir, recordings_root=recordings_root, config_path=config_path,
         users=UserStore(data_dir / "web.db"), queries=EventQueries(db_path), alerts=AlertStore(db_path),
         detector_url=os.environ.get("BB_DETECTOR_URL", "http://detector:5050").rstrip("/"),
         trusted_proxies=_nets(os.environ.get("BB_TRUSTED_PROXIES", "")),

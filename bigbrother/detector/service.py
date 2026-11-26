@@ -15,7 +15,7 @@ import numpy as np
 
 from ..config import Camera, Config
 from ..events_db import EventStore
-from ..mqtt import Publisher
+from ..mqtt import Publisher, restart_on_config_change
 from .events import EventManager
 from .frames import FrameSource
 from .model_store import resolve_model
@@ -159,6 +159,7 @@ def run(cfg: Config, data_dir: Path, db_path: Path, viewer_port: int,
     mqtt = None
     if os.environ.get("BB_MQTT", "1") != "0":
         mqtt = Publisher(cfg.mqtt_host, cfg.mqtt_port, cfg.mqtt_prefix, "detector")
+        restart_on_config_change(mqtt, "detector", stop, cfg.source_mtime)
         mqtt.start()
 
     def publish(topic: str, payload: dict, retain: bool) -> None:
@@ -190,8 +191,12 @@ def run(cfg: Config, data_dir: Path, db_path: Path, viewer_port: int,
         server = start_viewer(workers, store, data_dir, viewer_port, AlertStore(db_path), publish)
 
     try:
+        last_log = time.monotonic()
         while not stop.is_set():
-            stop.wait(60)
+            stop.wait(5)
+            if time.monotonic() - last_log < 60:
+                continue
+            last_log = time.monotonic()
             for w in workers:
                 s = w.stats()
                 log.info("[%s] %s in=%.1ffps detect=%.1ffps infer=%sms wait=%sms events=%d filtered=%d skipped=%d",

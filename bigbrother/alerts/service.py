@@ -23,7 +23,7 @@ import numpy as np
 
 from ..alerts_db import AlertRecord, AlertStore
 from ..config import Config
-from ..mqtt import Publisher
+from ..mqtt import Publisher, restart_on_config_change
 from .notify import Message, make_notifier
 from .rules import evaluate
 from .verifier import Verifier, fetch_frame
@@ -235,6 +235,7 @@ def run(cfg: Config, data_dir: Path, db_path: Path) -> None:
 
     mqtt.subscribe("events", on_event)
     mqtt.subscribe("alerts/armed/set", on_armed)
+    restart_on_config_change(mqtt, "alerter", stop, cfg.source_mtime)
     mqtt.start()
     publish("alerts/armed", "on" if store.armed() else "off", True)
 

@@ -1,3 +1,4 @@
+// go2rtc video-rtc.js v1.9.14 (MIT, see video-rtc.LICENSE), with one BigBrother patch marked below.
 /**
  * VideoRTC v1.6.0 - Video player for go2rtc streaming application.
  *
@@ -464,7 +465,11 @@ export class VideoRTC extends HTMLElement {
                     }
                 }
 
-                if (!sb.updating && sb.buffered && sb.buffered.length) {
+                // BigBrother patch: the buffer can be detached while the page tears the
+                // player down, and reading it then throws.
+                let buffered = null;
+                try { buffered = sb.buffered; } catch (e) { return; }
+                if (!sb.updating && buffered && buffered.length) {
                     const end = sb.buffered.end(sb.buffered.length - 1);
                     const start = end - 5;
                     const start0 = sb.buffered.start(0);

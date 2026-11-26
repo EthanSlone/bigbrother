@@ -145,7 +145,7 @@ def _web(args) -> int:
     from .web.app import run
 
     cfg = load_config(args.config)
-    run(cfg, Path(args.data), Path(args.db), Path(args.recordings), args.port)
+    run(cfg, Path(args.data), Path(args.db), Path(args.recordings), args.port, Path(args.config))
     return 0
 
 

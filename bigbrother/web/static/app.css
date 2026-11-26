@@ -75,10 +75,11 @@ a{color:inherit}
 .chip{border:1px solid var(--rule);background:none;border-radius:999px;padding:4px 12px;cursor:pointer;color:var(--mist)}
 .chip:hover{color:var(--ink)}
 .chip[aria-pressed=true]{background:var(--deck2);color:var(--ink);border-color:#4B6377}
-input[type=text],input[type=password],input[type=date],input[type=number],select,textarea{background:var(--night);border:1px solid var(--rule);
+input[type=text],input[type=password],input[type=date],input[type=time],input[type=number],select,textarea{background:var(--night);border:1px solid var(--rule);
   border-radius:var(--r-m);padding:9px 12px;width:100%}
 input:focus,select:focus,textarea:focus{border-color:#57728A;outline:none}
 label.field{display:grid;gap:6px;color:var(--mist);font-size:var(--step--1)}
+label.field input,label.field select,label.field textarea{font-size:var(--step-0);color:var(--ink)}
 .check{display:flex;gap:10px;align-items:center;color:var(--mist);cursor:pointer}
 .check input{width:18px;height:18px;accent-color:var(--lamp)}
 .error{color:#F2A094}
@@ -183,6 +184,7 @@ dialog.sheet::backdrop{background:rgba(5,10,15,.72)}
 .subnav a:hover{color:var(--ink);background:var(--deck)}
 .subnav a[aria-current=page]{color:var(--ink);background:var(--deck2)}
 .panel{display:grid;gap:22px;max-width:760px}
+.panel.wide{max-width:1180px}
 .panel h2{font-size:var(--step-2);margin:0}
 .panel h3{font-size:var(--step-1);margin:0 0 6px}
 .panel p{margin:0;color:var(--mist);max-width:64ch}
@@ -202,7 +204,7 @@ table.health th,table.health td{text-align:left;padding:10px 12px 10px 0;border-
 table.health th{color:var(--mist);font-size:var(--step--1)}
 table.health td.num{text-align:right}
 .saved{color:var(--ok)}
-.editor{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:20px;align-items:start}
+.editor{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:20px;align-items:start}
 .editor .stage{position:relative;background:var(--video);border-radius:var(--r-m);overflow:hidden;aspect-ratio:16/9}
 .editor .stage img{width:100%;height:100%;object-fit:fill;display:block}
 .editor .stage svg{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair;touch-action:none}

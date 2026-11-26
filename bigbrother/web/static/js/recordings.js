@@ -1,4 +1,10 @@
-import {$, $$, api, esc, state, go, ICON, labelName, timeOf, timeSec, toast} from './app.js';
+import {$, $$, api, esc, state, go, ICON, labelName, timeOf, timeSec, toast, camName} from './app.js';
+import {MultiView} from './multiview.js';
+
+const ALL = 'all';   // every camera on one timeline
+let multi = null;
+const remember = v => { try { localStorage.setItem('bb.rec.cam', v); } catch { /* private mode */ } };
+const remembered = () => { try { return localStorage.getItem('bb.rec.cam'); } catch { return null; } };
 
 const ZOOMS = [24, 6, 1];
 let root, shell, timer;
@@ -10,10 +16,11 @@ const startOfDay = ts => { const d = new Date(ts * 1000); return new Date(d.getF
 const isoDay = ts => { const d = new Date(ts * 1000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
 export async function mount(view, route, sh) {
+  if (multi) { multi.destroy(); multi = null; }   // left over from a mount that was cut short
   root = view; shell = sh;
   root.innerHTML = `
     <div class="rec-bar">
-      <select id="cam" aria-label="Camera">${state.cameras.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select>
+      <select id="cam" aria-label="Camera">${state.cameras.length > 1 ? `<option value="${ALL}">All cameras</option>` : ''}${state.cameras.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select>
       <button class="btn quiet" id="prev" aria-label="Previous day">${ICON.back}</button>
       <input type="date" id="day" aria-label="Day">
       <button class="btn quiet" id="next" aria-label="Next day" style="transform:scaleX(-1)">${ICON.back}</button>
@@ -31,7 +38,10 @@ export async function mount(view, route, sh) {
       <label class="field">Note (optional)<input type="text" name="note" maxlength="300" placeholder="e.g. walked along the fence in the dark"></label>
       <div style="display:flex;gap:10px"><button class="btn primary" value="send">Report it</button><button class="btn quiet" value="cancel">Cancel</button></div>
     </form></dialog>
-    <div class="player"><video id="v" playsinline controls></video><div class="msg" id="pmsg" hidden></div></div>
+    <div class="player"><video id="v" playsinline controls></video><div class="multi" id="multi" hidden></div><div class="msg" id="pmsg" hidden></div></div>
+    <div class="mctl" id="mctl" hidden><button class="btn" id="mplay" aria-pressed="false">${ICON.play}<span>Play</span></button>
+      <div class="seg" id="mrate" role="group" aria-label="Speed">${[1, 2, 4, 8].map(r => `<button data-r="${r}" aria-pressed="${r === 1}">${r}×</button>`).join('')}</div>
+      <span class="muted">Select a camera to watch it on its own.</span></div>
     <div class="clock"><b id="clock">–</b><span class="muted" id="clockday"></span></div>
     <div class="scrub" id="scrub" role="slider" tabindex="0" aria-label="Recording timeline"></div>
     <div class="axis" id="axis"></div>
@@ -39,7 +49,8 @@ export async function mount(view, route, sh) {
     <div class="tip" id="tip" hidden></div>`;
 
   const q = route.query;
-  cam = state.camById[q.get('cam')] ? q.get('cam') : (state.cameras[0] || {}).id;
+  const okCam = c => c && (state.camById[c] || (c === ALL && state.cameras.length > 1));
+  cam = okCam(q.get('cam')) ? q.get('cam') : okCam(remembered()) ? remembered() : (state.cameras[0] || {}).id;
   if (!cam) { root.innerHTML = '<div class="empty"><h2>No cameras yet</h2>Add cameras under Settings.</div>'; return; }
   const t = Number(q.get('t')) || null;
   dayStart = startOfDay(t || now());
@@ -47,7 +58,12 @@ export async function mount(view, route, sh) {
   $('#day', root).value = isoDay(dayStart);
   $('#day', root).max = isoDay(now());
 
-  $('#cam', root).onchange = e => { cam = e.target.value; syncUrl(); reload(playhead); };
+  $('#cam', root).onchange = e => { cam = e.target.value; remember(cam); syncUrl(); setMode(); reload(playhead); };
+  $('#mplay', root).onclick = () => { if (multi) { multi.setPlaying(!multi.playing); showMultiPlaying(); } };
+  for (const b of $$('#mrate button', root)) b.onclick = () => { if (multi) multi.setRate(+b.dataset.r);
+    for (const x of $$('#mrate button', root)) x.setAttribute('aria-pressed', x === b); };
+  root.addEventListener('keydown', e => { if (multi && e.key === ' ' && !e.target.closest('input,select,button,video')) {
+    e.preventDefault(); multi.setPlaying(!multi.playing); showMultiPlaying(); } });
   $('#day', root).onchange = e => { const [y, m, d] = e.target.value.split('-').map(Number);
     if (!y) return; dayStart = new Date(y, m - 1, d).getTime() / 1000; syncUrl(); reload(null); };
   $('#prev', root).onclick = () => shiftDay(-1);
@@ -57,6 +73,7 @@ export async function mount(view, route, sh) {
     for (const x of $$('#zoom button', root)) x.setAttribute('aria-pressed', x === b); draw(); };
   $('#save', root).onclick = save;
   $('#miss', root).onclick = () => {
+    if (cam === ALL) { toast('Pick the camera first: select it in the grid.'); return; }
     if (playhead == null) { toast('Pick the moment on the timeline first.'); return; }
     const v = $('#v', root); v.pause();
     $('#miss-when', root).textContent = `${state.camById[cam].name}, ${new Date(playhead * 1000).toLocaleString([], {weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit'})}. 10 seconds either side are kept for testing.`;
@@ -83,17 +100,26 @@ export async function mount(view, route, sh) {
     if (playhead >= dayStart + 86400) { dayStart = startOfDay(playhead); $('#day', root).value = isoDay(dayStart); loadTimeline(); }
     drawHead();
   });
-  v.addEventListener('error', () => { if (si >= 0) nextSegment(); });
+  v.addEventListener('error', () => {
+    if (si < 0) return;
+    if (v.error && v.error.code === 4) {   // format, not a damaged file: every minute will fail the same way
+      showMsg("This browser can't play this camera's recordings (H.265 video). Safari, or Chrome and Edge on a computer with " +
+              "H.265 hardware decoding, can. Saving 5 minutes still works.");
+      return;
+    }
+    nextSegment();
+  });
 
   wireScrub();
+  setMode();
   await reload(t, !t);
   timer = setInterval(() => { if (!document.hidden && dayStart === startOfDay(now())) loadTimeline(); }, 30000);
 }
 
 export function update(route) {
   const q = route.query, t = Number(q.get('t')) || null, c = q.get('cam');
-  if (c && state.camById[c] && (c !== cam || t)) {
-    cam = c; $('#cam', root).value = cam;
+  if (c && (state.camById[c] || c === ALL) && (c !== cam || t)) {
+    cam = c; $('#cam', root).value = cam; setMode();
     if (t) { dayStart = startOfDay(t); $('#day', root).value = isoDay(dayStart); }
     reload(t);
   }
@@ -101,6 +127,7 @@ export function update(route) {
 
 export function unmount() {
   clearInterval(timer);
+  if (multi) { multi.destroy(); multi = null; }
   const v = root && $('#v', root);
   if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
   root = null;
@@ -135,9 +162,44 @@ async function reload(t, latest = false) {
 
 async function loadTimeline() {
   try {
-    tl = await api(`/api/timeline?camera=${encodeURIComponent(cam)}&start=${dayStart}&end=${dayStart + 86400}`);
+    if (cam === ALL) {
+      const all = await Promise.all(state.cameras.map(c =>
+        api(`/api/timeline?camera=${encodeURIComponent(c.id)}&start=${dayStart}&end=${dayStart + 86400}`)
+          .then(r => ({...r, events: r.events.map(e => ({...e, camera: c.id}))}))));
+      const recorded = all.flatMap(r => r.recorded).sort((a, b) => a[0] - b[0]);
+      tl = {recorded: recorded.reduce((m, r) => {   // union, so the bar shows when any camera recorded
+        const last = m[m.length - 1];
+        if (last && r[0] <= last[1] + 1) last[1] = Math.max(last[1], r[1]); else m.push([...r]);
+        return m; }, []), events: all.flatMap(r => r.events).sort((a, b) => a.start - b.start)};
+    } else {
+      tl = await api(`/api/timeline?camera=${encodeURIComponent(cam)}&start=${dayStart}&end=${dayStart + 86400}`);
+    }
   } catch (e) { if (e.status !== 401) toast(e.message); tl = null; return; }
   draw();
+}
+
+// One camera with its own controls, or all of them in a grid on one clock.
+function setMode() {
+  const all = cam === ALL, v = $('#v', root);
+  $('#multi', root).hidden = !all; v.hidden = all; $('#mctl', root).hidden = !all;
+  $('.player', root).classList.toggle('grid', all);
+  $('.player', root).style.setProperty('--rows', Math.ceil(state.cameras.length / 2));
+  if (all && !multi) {
+    v.pause(); v.removeAttribute('src'); v.load(); segs = []; si = -1;
+    multi = new MultiView($('#multi', root), state.cameras, {
+      onTime: t => { if (dragging || t == null) return; playhead = t;
+        if (playhead >= dayStart + 86400) { dayStart = startOfDay(playhead); $('#day', root).value = isoDay(dayStart); loadTimeline(); }
+        drawHead(); },
+      onOpen: (c, t) => go(`#/recordings?cam=${encodeURIComponent(c)}&t=${Math.floor(t || playhead || now())}`),
+      onCaughtUp: () => { showMultiPlaying(); toast('Caught up with the recordings. The newest minute appears once it has been saved.'); },
+    });
+  } else if (!all && multi) { multi.destroy(); multi = null; }
+}
+function showMultiPlaying() {
+  const b = $('#mplay', root); if (!b || !multi) return;
+  b.setAttribute('aria-pressed', multi.playing);
+  b.innerHTML = multi.playing ? `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3v14H7zM14 5h3v14h-3z" fill="currentColor"/></svg><span>Pause</span>`
+                              : `${ICON.play}<span>Play</span>`;
 }
 
 function win() {
@@ -174,7 +236,7 @@ function draw() {
   }
   $('#axis', root).innerHTML = ticks;
   $('#evlist', root).innerHTML = inView.length ? inView.slice(0, 60).map(e =>
-    `<button class="chip k-${esc(e.label)}" data-t="${e.start}"><span class="kind">${esc(labelName(e.label))}</span> ${timeOf(e.start)}</button>`).join('')
+    `<button class="chip k-${esc(e.label)}" data-t="${e.start}"><span class="kind">${esc(labelName(e.label))}</span> ${timeOf(e.start)}${e.camera ? `, ${esc(camName(e.camera))}` : ''}</button>`).join('')
     : '<span class="muted">No events in this stretch.</span>';
   for (const c of $$('#evlist .chip', root)) c.onclick = () => seek(+c.dataset.t - 3, true);
   drawHead();
@@ -238,6 +300,7 @@ function showMsg(text) {
 
 async function seek(t, play) {
   playhead = t; drawHead();
+  if (multi) { showMsg(''); await multi.seek(t, play); showMultiPlaying(); draw(); return; }
   const v = $('#v', root);
   let got;
   try { got = await api(`/api/segments?camera=${encodeURIComponent(cam)}&start=${t - 180}&end=${t + 6 * 3600}`); }
@@ -278,6 +341,7 @@ async function nextSegment() {
 }
 
 function save() {
+  if (cam === ALL) { toast('Pick the camera first: select it in the grid.'); return; }
   if (playhead == null) { toast('Pick a moment on the timeline first.'); return; }
   const start = Math.floor(playhead), end = start + 300;
   const a = document.createElement('a');

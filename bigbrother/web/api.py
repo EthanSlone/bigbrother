@@ -101,12 +101,36 @@ async def status(request: web.Request) -> web.Response:
 
 # -- armed ------------------------------------------------------------------------------------
 
+def _new_events(ctx: WebContext, username: str) -> int:
+    seen = ctx.users.prefs(username).get("events_seen_ts")
+    if seen is None:   # first visit: start counting from now, not from the beginning of time
+        ctx.users.update_prefs(username, {"events_seen_ts": time.time()})
+        return 0
+    return ctx.queries.count_new(float(seen))
+
+
 async def get_armed(request: web.Request) -> web.Response:
-    """Armed state plus the number of system problems (for the badge on Settings)."""
+    """Armed state, system problems (badge on Settings) and events you haven't seen (badge on Events)."""
     ctx = request.app[CTX]
     health = ctx.status.get("health")
     problems = len(health.get("problems", [])) if isinstance(health, dict) else 0
-    return web.json_response({"armed": await asyncio.to_thread(ctx.alerts.armed), "problems": problems})
+    return web.json_response({"armed": await asyncio.to_thread(ctx.alerts.armed), "problems": problems,
+                              "new": await asyncio.to_thread(_new_events, ctx, request[SESSION].user.username)})
+
+
+async def mark_seen(request: web.Request) -> web.Response:
+    """The Events page was looked at: events up to `ts` are no longer new for this person."""
+    ctx = request.app[CTX]
+    body = await request.json()
+    user = request[SESSION].user.username
+    prev = (await asyncio.to_thread(ctx.users.prefs, user)).get("events_seen_ts")
+    try:
+        ts = min(float(body.get("ts", time.time())), time.time())
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="ts must be a number") from exc
+    if prev is None or ts > float(prev):
+        await asyncio.to_thread(ctx.users.update_prefs, user, {"events_seen_ts": ts})
+    return web.json_response({"seen": max(ts, float(prev or 0)), "previous": prev})
 
 
 async def set_armed(request: web.Request) -> web.Response:
@@ -141,6 +165,39 @@ async def events(request: web.Request) -> web.Response:
         since=_float(q, "since"), until=_float(q, "until"), before=_float(q, "before"),
         alert=q.get("alert") or None, zone=q.get("zone") or None, review=q.get("review") or None, limit=limit)
     return web.json_response([_public_event(e) for e in rows])
+
+
+async def keep_event(request: web.Request) -> web.Response:
+    ctx = request.app[CTX]
+    body = await request.json()
+    keep = bool(body.get("keep"))
+    ok = await asyncio.to_thread(ctx.queries.keep, request.match_info["id"],
+                                 request[SESSION].user.username if keep else None)
+    if not ok:
+        raise web.HTTPNotFound()
+    return web.json_response({"kept": keep})
+
+
+async def delete_event(request: web.Request) -> web.Response:
+    """Admins only (see app.admin_only): removes the event, its pictures and its kept clip."""
+    from ..event_cleanup import remove_files
+    from ..events_db import EventStore
+    ctx = request.app[CTX]
+    eid = request.match_info["id"]
+
+    def run():
+        store = EventStore(ctx.db_path)
+        try:
+            gone = store.delete([eid])
+        finally:
+            store.close()
+        remove_files(ctx.db_path, ctx.data_dir, gone)
+        return gone
+    gone = await asyncio.to_thread(run)
+    if not gone:
+        raise web.HTTPNotFound()
+    log.info("event %s (%s, %s) deleted by %s", eid, gone[0].camera, gone[0].label, request[SESSION].user.username)
+    return web.json_response({"deleted": eid})
 
 
 async def event(request: web.Request) -> web.Response:
@@ -307,6 +364,9 @@ def register(app: web.Application) -> None:
     r.add_post("/api/armed", set_armed)
     r.add_get("/api/events", events)
     r.add_get("/api/events/{id}", event)
+    r.add_delete("/api/events/{id}", delete_event)
+    r.add_put("/api/events/{id}/keep", keep_event)
+    r.add_post("/api/me/seen", mark_seen)
     r.add_get("/media/snapshot/{id}.jpg", snapshot)
     r.add_get("/media/alert/{id}.jpg", alert_image)
     r.add_get("/media/clip/{id}.mp4", clip)

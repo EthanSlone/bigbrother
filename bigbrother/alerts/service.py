@@ -273,12 +273,21 @@ def run(cfg: Config, data_dir: Path, db_path: Path, recordings_root: Path = Path
     publish("alerts/armed", "on" if store.armed() else "off", True)
 
     alerter = Alerter(cfg, store, data_dir, notifier, verifier, publish)
+    from .arming import ArmSchedule
+    arming = ArmSchedule(cfg.alerts.arm_schedule, store, cfg.alerts.timezone, publish)
+    next_arm_check = 0.0
     try:
         while not stop.is_set():
             try:
                 health.tick()
             except Exception:  # noqa: BLE001 - health checks must never stop alerting
                 log.exception("health check failed")
+            if time.monotonic() >= next_arm_check:
+                next_arm_check = time.monotonic() + 10
+                try:
+                    arming.tick()
+                except Exception:  # noqa: BLE001
+                    log.exception("arm schedule check failed")
             try:
                 msg = inbox.get(timeout=1.0)
             except queue.Empty:

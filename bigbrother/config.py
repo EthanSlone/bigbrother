@@ -122,6 +122,7 @@ class AlertSettings:
     health_enabled: bool = True           # alert when a camera stops recording, disk fills, ...
     health_after_minutes: int = 5         # how long a problem must last before it's reported
     group_seconds: int = 90               # one alert per visit: same object on another camera within this
+    arm_schedule: tuple = ()              # Schedule windows: alerts turn on at each start, off at each end
 
 
 @dataclass(frozen=True)
@@ -428,7 +429,7 @@ def _alert_settings(raw: Any) -> AlertSettings:
     if not isinstance(raw, dict):
         raise ConfigError("alerts must be a mapping")
     unknown = set(raw) - {"enabled", "notifier", "timezone", "verify", "verify_model", "verify_threshold",
-                          "public_url", "pushover", "threads", "health", "group_seconds"}
+                          "public_url", "pushover", "threads", "health", "group_seconds", "arm_schedule"}
     if unknown:
         raise ConfigError(f"alerts: unknown key(s) {sorted(unknown)}")
     notifier = str(raw.get("notifier", "pushover"))
@@ -463,6 +464,7 @@ def _alert_settings(raw: Any) -> AlertSettings:
         health_enabled=bool(health.get("enabled", True)),
         health_after_minutes=int(_number(health.get("after_minutes", 5), "alerts.health.after_minutes", 1, 1440)),
         group_seconds=int(_number(raw.get("group_seconds", 90), "alerts.group_seconds", 0, 900)),
+        arm_schedule=_schedule(raw.get("arm_schedule"), "alerts.arm_schedule"),
     )
 
 

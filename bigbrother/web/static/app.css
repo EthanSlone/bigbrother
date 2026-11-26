@@ -43,6 +43,8 @@ a{color:inherit}
 .nav a:hover{color:var(--ink);background:var(--deck)}
 .nav a[aria-current=page]{color:var(--ink);background:var(--deck2)}
 .nav a{position:relative}
+.nav a .count{position:absolute;top:4px;left:calc(50% + 6px);min-width:18px;height:18px;padding:0 5px;border-radius:9px;
+  background:var(--lamp);color:#241503;font-size:11px;font-weight:700;line-height:18px;text-align:center;box-shadow:0 0 0 2px var(--night);font-variant-numeric:tabular-nums}
 .nav a.alarm::after{content:"";position:absolute;top:7px;right:calc(50% - 16px);width:9px;height:9px;border-radius:50%;background:var(--red);box-shadow:0 0 0 2px var(--night)}
 .problems{display:grid;gap:8px;margin-bottom:22px}
 .problem{border-left:3px solid var(--red);background:rgba(229,96,77,.08);padding:10px 14px;border-radius:0 var(--r-m) var(--r-m) 0}
@@ -151,6 +153,10 @@ input.code{font-size:1.6rem!important;letter-spacing:.3em;text-align:center;font
 .ev img{width:200px;aspect-ratio:16/9;object-fit:cover;border-radius:var(--r-s);background:var(--video);display:block}
 .ev .what{display:grid;gap:2px;min-width:0}
 .ev .where{color:var(--mist)}
+.ev.new{box-shadow:inset 3px 0 0 var(--lamp)}
+.newdot{margin-left:8px;font-size:var(--step--1);color:var(--lamp);font-weight:700}
+.ev .kept svg{width:15px;height:15px;margin-left:8px;vertical-align:-2px;color:var(--lamp);fill:var(--lamp)}
+#keep[aria-pressed=true]{color:var(--lamp)}#keep[aria-pressed=true] svg{fill:var(--lamp)}
 .ev .when{text-align:right;color:var(--mist);display:grid;gap:4px;justify-items:end}
 .ev .when b{color:var(--ink);font-weight:400;font-size:var(--step-1)}
 .badge{font-size:var(--step--1);padding:1px 9px;border-radius:999px;background:var(--deck2);color:var(--mist);white-space:nowrap}
@@ -188,6 +194,19 @@ dialog.sheet::backdrop{background:rgba(5,10,15,.72)}
 .player{background:var(--video);border-radius:var(--r-m);overflow:hidden;aspect-ratio:16/9;position:relative;
   width:min(100%,calc((100vh - 330px) * 16 / 9));min-width:min(100%,480px)}
 .player video{width:100%;height:100%;object-fit:contain;display:block}
+.player.grid{display:block;aspect-ratio:auto;background:none;overflow:visible;width:min(100%,calc((100vh - 330px) * 32 / 9 / var(--rows,1)))}
+.multi{display:grid;gap:6px;grid-template-columns:repeat(2,minmax(0,1fr))}
+.multi[hidden]{display:none}
+.mcell{position:relative;aspect-ratio:16/9;background:var(--video);border-radius:var(--r-s);overflow:hidden;padding:0;border:0;cursor:pointer;color:inherit;font:inherit}
+.mcell video{width:100%;height:100%;object-fit:contain;display:block;pointer-events:none}
+.mcell:hover,.mcell:focus-visible{outline:2px solid var(--lamp);outline-offset:-2px}
+.mname{position:absolute;left:8px;top:6px;padding:2px 8px;border-radius:999px;background:rgba(10,16,22,.7);font-size:var(--step--1)}
+.mmsg{position:absolute;inset:0;display:grid;place-items:center;color:var(--mist);font-size:var(--step--1)}
+.mcell.empty video{visibility:hidden}
+.mctl{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px}
+.mctl[hidden]{display:none}
+.mctl .btn svg{width:16px;height:16px}
+@media (max-width:640px){.multi{grid-template-columns:1fr 1fr;gap:4px}.mname{font-size:11px;left:4px;top:4px}}
 .player .msg{position:absolute;inset:0;display:grid;place-items:center;color:var(--mist);padding:20px;text-align:center}
 .clock{display:flex;align-items:baseline;gap:14px;margin:12px 0 8px}
 .clock b{font-size:var(--step-2)}

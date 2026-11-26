@@ -62,6 +62,9 @@ export const ICON = {
   play: I('<path d="M7 5l12 7-12 7z" fill="currentColor"/>'),
   download: I('<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>'),
   expand: I('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'),
+  star: I('<path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/>'),
+  trash: I('<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>'),
+  grid: I('<rect x="3" y="4" width="8" height="7" rx="1"/><rect x="13" y="4" width="8" height="7" rx="1"/><rect x="3" y="13" width="8" height="7" rx="1"/><rect x="13" y="13" width="8" height="7" rx="1"/>'),
 };
 // The mark: a roofline over a lens whose pupil is the porch lamp.
 export const MARK = `<svg viewBox="0 0 64 64" aria-hidden="true"><path d="M9 29 32 9l23 20" fill="none" stroke="#E6EDF2" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="32" cy="40" r="13.5" fill="none" stroke="#E6EDF2" stroke-width="5.5"/><circle cx="32" cy="40" r="6" fill="#F0A93A"/></svg>`;
@@ -196,6 +199,16 @@ function showProblems(n) {
   a.classList.toggle('alarm', n > 0);
   a.title = n ? `${n} system problem${n > 1 ? 's' : ''}: see Settings → System status` : '';
 }
+// Events you haven't looked at yet, shown on the Events button.
+export function showNew(n) {
+  const a = $('.nav a[data-view=events]');
+  if (!a) return;
+  let c = $('.count', a);
+  if (!n) { if (c) c.remove(); a.removeAttribute('aria-description'); return; }
+  if (!c) { c = document.createElement('b'); c.className = 'count'; a.appendChild(c); }
+  c.textContent = n > 99 ? '99+' : n;
+  a.setAttribute('aria-description', `${n} new event${n > 1 ? 's' : ''}`);
+}
 async function toggleArmed() {
   const want = !state.armed;
   try {
@@ -220,6 +233,7 @@ export function go(hash, replace = false) {
   else location.hash = hash;   // fires hashchange -> route()
 }
 
+let routing = 0;
 async function route() {
   if (!state.user) return;
   const r = parseHash();
@@ -228,8 +242,10 @@ async function route() {
     if (a.dataset.view === name) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
   if (current && current.name === name && current.mod.update) { current.mod.update(r); return; }
+  const token = ++routing;
   stopView();
   const mod = await VIEWS[name].load();
+  if (token !== routing) return;   // another navigation started while this view was loading
   current = {name, mod};
   $('#title').textContent = VIEWS[name].title;
   $('#tools').innerHTML = '';
@@ -245,7 +261,10 @@ async function start() {
   state.user = s.user; state.role = s.role; state.twofa = s.twofa;
   await loadCameras();
   renderShell();
-  const poll = () => api('/api/armed').then(r => { showArmed(r.armed); showProblems(r.problems); }).catch(() => {});
+  const poll = () => api('/api/armed').then(r => {
+    showArmed(r.armed); showProblems(r.problems);
+    showNew(current && current.name === 'events' ? 0 : r.new);
+  }).catch(() => {});
   poll();
   clearInterval(armedTimer);
   armedTimer = setInterval(() => { if (!document.hidden) poll(); }, 20000);

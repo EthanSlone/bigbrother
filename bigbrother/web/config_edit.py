@@ -31,7 +31,7 @@ BACKUPS_KEPT = 20
 
 # Keys the app may set; anything else in the file is left as it is.
 CAMERA_KEYS = {"name", "streams", "record", "detect", "zones", "masks", "alert"}
-SETTINGS_KEYS = {"alerts": {"enabled", "notifier", "timezone", "verify", "verify_threshold", "public_url", "group_seconds"},
+SETTINGS_KEYS = {"alerts": {"enabled", "notifier", "timezone", "verify", "verify_threshold", "public_url", "group_seconds", "arm_schedule"},
                  "storage": {"retention_days", "max_usage_percent", "event_retention_days"}}
 
 
@@ -114,7 +114,7 @@ def _merge(target: CommentedMap, key: str, value: Any) -> None:
     """Set target[key] = value. Nested settings are merged key by key (so settings the app
     doesn't show, like detect.fps, survive); null removes a key. Zones and masks are
     replaced as a whole."""
-    if value is None or (value in ({}, []) and key in ("zones", "masks", "schedule")):
+    if value is None or (value in ({}, []) and key in ("zones", "masks", "schedule", "arm_schedule")):
         target.pop(key, None)
         return
     if isinstance(value, dict) and isinstance(target.get(key), CommentedMap) and key not in ("zones", "masks"):

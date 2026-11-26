@@ -33,7 +33,7 @@ COOKIE = "bb_session"
 CSRF_HEADER = "X-BigBrother"       # custom header: browsers won't send it cross-site without CORS
 PUBLIC = {"/", "/index.html", "/manifest.webmanifest", "/sw.js", "/api/session", "/api/login", "/api/login/code",
           "/api/setup"}
-VERSION = "2"
+VERSION = "3"
 
 # What members (non-admins) can't do: change settings, manage accounts, delete events, export.
 ADMIN_ONLY_PREFIXES = ("/api/config", "/api/users", "/api/testset", "/media/testset", "/api/notify/settings")
@@ -347,6 +347,13 @@ def create_app(ctx: WebContext) -> web.Application:
     app.router.add_get("/manifest.webmanifest", manifest)
     app.router.add_get("/sw.js", service_worker)
     app.router.add_static("/static/", STATIC, append_version=False)
+
+    async def revalidate_static(request, response):
+        # Module imports inside app.js aren't versioned, so make browsers check each file
+        # (a cheap 304 when unchanged) instead of guessing how long to keep it after an update.
+        if request.path.startswith("/static/") and "Cache-Control" not in response.headers:
+            response.headers["Cache-Control"] = "no-cache"
+    app.on_response_prepare.append(revalidate_static)
     app.router.add_get("/api/session", session_info)
     app.router.add_post("/api/login", login)
     app.router.add_post("/api/login/code", login_code)

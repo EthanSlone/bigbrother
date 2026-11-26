@@ -28,6 +28,12 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_camera_start ON events(camera, start_ts);
 CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_ts);
+-- Starred in the app: kept whatever storage.event_retention_days says, until unstarred.
+CREATE TABLE IF NOT EXISTS kept_events (
+    event_id  TEXT PRIMARY KEY,
+    username  TEXT NOT NULL DEFAULT '',
+    ts        REAL NOT NULL
+);
 """
 
 
@@ -125,11 +131,25 @@ class EventStore:
         """Remove ended events that started before cutoff; returns them (to delete their files)."""
         with self._lock:
             cur = self._db.execute(
-                "SELECT * FROM events WHERE end_ts IS NOT NULL AND start_ts < ? ORDER BY start_ts LIMIT ?",
+                "SELECT * FROM events WHERE end_ts IS NOT NULL AND start_ts < ? "
+                "AND id NOT IN (SELECT event_id FROM kept_events) ORDER BY start_ts LIMIT ?",
                 (cutoff_ts, limit))
             cols = [c[0] for c in cur.description]
             rows = [dict(zip(cols, r)) for r in cur.fetchall()]
             self._db.executemany("DELETE FROM events WHERE id = ?", [(r["id"],) for r in rows])
+        return [self._row(r) for r in rows]
+
+    def delete(self, event_ids: list[str]) -> list[Event]:
+        """Remove these events (even starred ones); returns them so their files can go too."""
+        if not event_ids:
+            return []
+        marks = ",".join("?" * len(event_ids))
+        with self._lock:
+            cur = self._db.execute(f"SELECT * FROM events WHERE id IN ({marks})", event_ids)
+            cols = [c[0] for c in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            self._db.execute(f"DELETE FROM events WHERE id IN ({marks})", event_ids)
+            self._db.execute(f"DELETE FROM kept_events WHERE event_id IN ({marks})", event_ids)
         return [self._row(r) for r in rows]
 
     def close(self) -> None:

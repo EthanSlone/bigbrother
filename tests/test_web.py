@@ -433,3 +433,47 @@ def test_phone_alert_settings(tmp_path, monkeypatch):
     assert len(msg) == 1 and "G" * 30 in msg[0] and "T" * 30 in msg[0]
     token, people = Directory(tmp_path / "web.db", {}).load()
     assert token == "T" * 30 and people[0].cameras == frozenset({"front"}) and not people[0].health
+
+
+def test_new_events_keep_and_delete(tmp_path):
+    import time as _t
+    from bigbrother.alerts_db import AlertRecord
+    from bigbrother.web.app import create_app
+    ctx = _ctx(tmp_path)
+    ctx.users.add("ethan", PW, "admin")
+    ctx.users.add("sam", PW, "member")
+    store = EventStore(tmp_path / "bb.db")
+    now = _t.time()
+    (tmp_path / "snaps").mkdir()
+    (tmp_path / "snaps" / "x.jpg").write_bytes(b"x")
+    (tmp_path / "alerts").mkdir()
+    (tmp_path / "alerts" / "x.jpg").write_bytes(b"x")
+
+    def add(eid, t, snap=None):
+        store.save(Event(eid, "front", "person", t, t + 5, 0.9, 0.8, [1, 2, 30, 40], 160, 90, False, snap, t + 6))
+
+    async def go():
+        async with TestClient(TestServer(create_app(ctx))) as admin, TestClient(TestServer(create_app(ctx))) as kid:
+            await admin.post("/api/login", json={"username": "ethan", "password": PW}, headers=H)
+            await kid.post("/api/login", json={"username": "sam", "password": PW}, headers=H)
+            assert (await (await kid.get("/api/armed")).json())["new"] == 0     # counting starts now
+            ctx.users.update_prefs("sam", {"events_seen_ts": now - 100})
+            add("x", now - 50, "snaps/x.jpg")
+            ctx.alerts.save(AlertRecord("x", "front", "person", "sent", image="alerts/x.jpg"))
+            add("y", now - 10)
+            assert (await (await kid.get("/api/armed")).json())["new"] == 2
+            r = await (await kid.post("/api/me/seen", json={"ts": now - 30}, headers=H)).json()
+            assert r["previous"] is not None
+            assert (await (await kid.get("/api/armed")).json())["new"] == 1
+            # anyone can star; only admins delete
+            assert (await kid.put("/api/events/x/keep", json={"keep": True}, headers=H)).status == 200
+            assert (await (await kid.get("/api/events/x")).json())["kept"]["by"] == "sam"
+            assert (await kid.delete("/api/events/x", headers=H)).status == 403
+            assert (await admin.delete("/api/events/x", headers=H)).status == 200
+            assert (await admin.get("/api/events/x")).status == 404
+            assert (await admin.delete("/api/events/x", headers=H)).status == 404
+            assert (await kid.put("/api/events/x/keep", json={"keep": True}, headers=H)).status == 404
+
+    _run(go())
+    assert not (tmp_path / "snaps" / "x.jpg").exists() and not (tmp_path / "alerts" / "x.jpg").exists()
+    assert ctx.alerts.get("x") is None

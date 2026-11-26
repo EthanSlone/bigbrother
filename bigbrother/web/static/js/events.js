@@ -1,9 +1,10 @@
-import {$, $$, api, esc, state, camName, go, parseHash, isAdmin, ICON, labelName, timeOf, timeSec, dayName, duration, ALERT_TEXT, toast} from './app.js';
+import {$, $$, api, esc, state, camName, go, parseHash, isAdmin, ICON, labelName, timeOf, timeSec, dayName, duration, ALERT_TEXT, toast, showNew} from './app.js';
 
 const PAGE = 40;
 let root = null, shell = null, timer = null;
 let filters = {cameras: new Set(), labels: new Set(), alert: '', day: '', review: ''};
 let items = [], done = false, loading = false;
+let seenBefore = Infinity;   // events after this are new to you (marked until you leave the page)
 
 export async function mount(view, route, sh) {
   root = view; shell = sh;
@@ -14,7 +15,7 @@ export async function mount(view, route, sh) {
       <div><h3>Alerts</h3><div class="seg" id="f-alert">
         <button data-v="" aria-pressed="true">All</button><button data-v="notified" aria-pressed="false">Alerted</button></div></div>
       <div><h3>Your review</h3><div class="seg" id="f-review">
-        <button data-v="" aria-pressed="true">All</button><button data-v="unreviewed" aria-pressed="false">To review</button><button data-v="false_alarm" aria-pressed="false">False alarms</button></div></div>
+        <button data-v="" aria-pressed="true">All</button><button data-v="unreviewed" aria-pressed="false">To review</button><button data-v="false_alarm" aria-pressed="false">False alarms</button><button data-v="kept" aria-pressed="false">Kept</button></div></div>
       <div><h3>Day</h3><input type="date" id="f-day" aria-label="Show events from this day"></div>
       <button class="btn quiet" id="f-clear" hidden>Clear filters</button>
     </aside>
@@ -50,6 +51,9 @@ export async function mount(view, route, sh) {
   sheet.addEventListener('click', e => { if (e.target === sheet) sheet.close(); });
 
   syncControls();
+  try { const r = await api('/api/me/seen', {method: 'POST', body: {ts: Date.now() / 1000}}); seenBefore = r.previous ?? Infinity; }
+  catch { /* still usable */ }
+  showNew(0);
   await load(true);
   openFromRoute(route);
   timer = setInterval(() => { if (!document.hidden) poll(); }, 8000);
@@ -133,6 +137,7 @@ async function poll() {
     const oldest = fresh.length ? fresh[fresh.length - 1].start_ts : Infinity;
     items = fresh.concat(items.filter(e => !ids.has(e.id) && e.start_ts < oldest));
     draw();
+    if (fresh.length) api('/api/me/seen', {method: 'POST', body: {ts: Date.now() / 1000}}).catch(() => {});
   } catch { /* offline for a moment */ }
 }
 
@@ -165,9 +170,10 @@ function draw() {
     const day = dayName(e.start_ts);
     if (day !== lastDay) { html += `${lastDay ? '</div>' : ''}<h2 class="day">${esc(day)}</h2><div class="feed">`; lastDay = day; }
     const zones = e.zones.length ? `, ${e.zones.map(z => esc(z.replace(/_/g, ' '))).join(', ')}` : '';
-    html += `<button class="ev k-${esc(e.label)}" data-ev="${esc(e.id)}">
+    const fresh = e.start_ts > seenBefore;
+    html += `<button class="ev k-${esc(e.label)}${fresh ? ' new' : ''}" data-ev="${esc(e.id)}">
       ${e.has_snapshot ? `<img src="/media/snapshot/${esc(e.id)}.jpg?w=400&u=${e.updated_ts}" alt="" loading="lazy">` : '<img alt="">'}
-      <span class="what"><span class="kind">${esc(labelName(e.label))}</span>
+      <span class="what"><span class="kind">${esc(labelName(e.label))}${fresh ? '<span class="newdot">New</span>' : ''}${e.kept ? `<span class="kept" title="Kept">${ICON.star}</span>` : ''}</span>
         <span class="where">${esc(camName(e.camera))}${zones}</span></span>
       <span class="when"><b>${timeOf(e.start_ts)}</b>
         ${e.end_ts ? `<span>${esc(duration(e.start_ts, e.end_ts))}</span>` : '<span class="badge live">In view now</span>'}
@@ -190,7 +196,9 @@ async function openFromRoute(route) {
   sheet.innerHTML = `<div class="hd"><h2 id="sheet-title"><span class="kind k-${esc(e.label)}">${esc(labelName(e.label))}</span></h2>
       <span class="muted">${esc(camName(e.camera))}</span><div class="grow"></div>
       <a class="btn quiet" href="#/recordings?cam=${encodeURIComponent(e.camera)}&t=${Math.floor(e.start_ts - 5)}">${ICON.recordings}Recordings</a>
+      <button class="btn quiet" id="keep" aria-pressed="${!!e.kept}" title="Kept events stay after old recordings are removed">${ICON.star}<span>${e.kept ? 'Kept' : 'Keep'}</span></button>
       <a class="btn quiet" id="dl" href="/media/clip/${esc(e.id)}.mp4" download="${esc(e.camera)}-${esc(e.id)}.mp4">${ICON.download}Save clip</a>
+      ${isAdmin() ? `<button class="btn quiet" id="del" title="Delete this event">${ICON.trash}<span class="sr">Delete</span></button>` : ''}
       <button class="btn quiet" id="x" aria-label="Close">${ICON.close}</button></div>
     <video controls playsinline ${e.has_snapshot ? `poster="/media/snapshot/${esc(e.id)}.jpg?u=${e.updated_ts}"` : ''}></video>
     <p class="note" id="clipnote" hidden></p>
@@ -203,8 +211,28 @@ async function openFromRoute(route) {
       ${e.stationary ? '<div>Movement<b>Stationary</b></div>' : ''}
       <div>Alert<b>${a ? esc(ALERT_TEXT[a.status] || a.status) : 'None'}${a && a.reason && a.status !== 'sent' ? `: ${esc(a.reason)}` : ''}</b></div>
       ${a && a.verify_score != null ? `<div>Second opinion<b>${Math.round(a.verify_score * 100)}%</b></div>` : ''}
+      ${e.kept ? `<div>Kept<b>by ${esc(e.kept.by)}, ${esc(dayName(e.kept.ts))}</b></div>` : ''}
     </div>`;
   $('#x', sheet).onclick = () => sheet.close();
+  $('#keep', sheet).onclick = async ev => {
+    const btn = ev.currentTarget, keep = btn.getAttribute('aria-pressed') !== 'true';
+    try {
+      await api(`/api/events/${encodeURIComponent(e.id)}/keep`, {method: 'PUT', body: {keep}});
+      btn.setAttribute('aria-pressed', keep); $('span', btn).textContent = keep ? 'Kept' : 'Keep';
+      const it = items.find(x => x.id === e.id); if (it) it.kept = keep ? {by: state.user, ts: Date.now() / 1000} : null;
+      draw();
+      toast(keep ? 'Kept: this event stays until you remove the star.' : 'No longer kept: it goes with old recordings.', 3500);
+    } catch (ex) { toast(ex.message); }
+  };
+  const del = $('#del', sheet);
+  if (del) del.onclick = async () => {
+    if (!confirm(`Delete this ${labelName(e.label).toLowerCase()} event from ${camName(e.camera)}? Its snapshot and saved clip go too. The recording itself stays.`)) return;
+    try {
+      await api(`/api/events/${encodeURIComponent(e.id)}`, {method: 'DELETE'});
+      items = items.filter(x => x.id !== e.id); draw();
+      sheet.close(); toast('Event deleted');
+    } catch (ex) { toast(ex.message); }
+  };
   drawReview($('#review', sheet), e);
   if (!sheet.open) sheet.showModal();
   const video = $('video', sheet), note = $('#clipnote', sheet), dl = $('#dl', sheet);

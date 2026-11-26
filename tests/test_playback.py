@@ -213,3 +213,24 @@ def test_event_clips_are_kept_after_recordings_go(tmp_path):
     assert path == kept and not meta["partial"]                   # still playable
     Retention(cfg, root, index, data_dir=tmp_path, db_path=db).run_once(now=t0 + 31 * 86400)
     assert not kept.exists() and events.get("done") is None
+
+
+def test_starred_events_outlive_retention(tmp_path):
+    from bigbrother.config import parse_config
+    from bigbrother.recorder.retention import Retention
+    from bigbrother.web.data import EventQueries
+
+    cfg = parse_config({"storage": {"event_retention_days": 7}, "cameras": {"front": {"streams": {"main": "rtsp://h/1"}}}})
+    db = tmp_path / "db.sqlite"
+    events, q = EventStore(db), EventQueries(db)
+    now = 1_800_000_000.0
+    for eid in ("a", "b"):
+        events.save(ev(eid, now - 30 * 86400, now - 30 * 86400 + 5))
+    assert q.keep("a", "ethan") and not q.keep("nope", "ethan")
+    Retention(cfg, tmp_path / "rec", RecordingIndex(db), lambda _: 10.0, data_dir=tmp_path, db_path=db).run_once(now)
+    assert [e.id for e in events.recent()] == ["a"]
+    assert q.event("a")["kept"]["by"] == "ethan"
+    assert [e["id"] for e in q.events(review="kept")] == ["a"]
+    q.keep("a", None)
+    Retention(cfg, tmp_path / "rec", RecordingIndex(db), lambda _: 10.0, data_dir=tmp_path, db_path=db).run_once(now)
+    assert events.recent() == []

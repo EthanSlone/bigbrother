@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-ALERT_STATUSES = ("sent", "logged", "failed", "suppressed", "pending")
+ALERT_STATUSES = ("sent", "logged", "failed", "suppressed", "pending", "grouped")
 
 
 class EventQueries:
@@ -64,6 +64,8 @@ class EventQueries:
             where.append("f.verdict IS NULL")
         elif review == "reviewed":
             where.append("f.verdict IS NOT NULL")
+        elif review == "kept":
+            where.append("k.event_id IS NOT NULL")
         elif review in ("correct", "false_alarm", "wrong_label"):
             where.append("f.verdict = ?")
             args.append(review)
@@ -80,8 +82,9 @@ class EventQueries:
 
     _SELECT = ("SELECT e.*, a.status AS a_status, a.reason AS a_reason, a.verify_score AS a_verify, "
                "a.sent_ts AS a_sent, a.image AS a_image, f.verdict AS f_verdict, f.label AS f_label, "
-               "f.note AS f_note FROM events e LEFT JOIN alerts a ON a.event_id = e.id "
-               "LEFT JOIN event_feedback f ON f.event_id = e.id")
+               "f.note AS f_note, k.username AS k_by, k.ts AS k_ts FROM events e "
+               "LEFT JOIN alerts a ON a.event_id = e.id "
+               "LEFT JOIN event_feedback f ON f.event_id = e.id LEFT JOIN kept_events k ON k.event_id = e.id")
 
     def event(self, event_id: str) -> dict | None:
         with self._lock:
@@ -95,6 +98,28 @@ class EventQueries:
             rows = self._db.execute("SELECT camera, COUNT(*) FROM events WHERE start_ts >= ? GROUP BY camera",
                                     (since,)).fetchall()
         return dict(rows)
+
+    def count_new(self, since: float, cameras: list[str] | None = None) -> int:
+        """Events that started after `since` (what someone hasn't looked at yet). Parked cars don't count."""
+        sql, args = "SELECT COUNT(*) FROM events WHERE start_ts > ? AND stationary = 0", [since]
+        if cameras is not None:
+            sql += f" AND camera IN ({','.join('?' * len(cameras)) or 'NULL'})"
+            args += cameras
+        with self._lock:
+            return self._db.execute(sql, args).fetchone()[0]
+
+    def keep(self, event_id: str, username: str | None) -> bool:
+        """Star (username given) or unstar (None). False if there's no such event."""
+        import time
+        with self._lock:
+            if not self._db.execute("SELECT 1 FROM events WHERE id = ?", (event_id,)).fetchone():
+                return False
+            if username is None:
+                self._db.execute("DELETE FROM kept_events WHERE event_id = ?", (event_id,))
+            else:
+                self._db.execute("INSERT OR REPLACE INTO kept_events (event_id, username, ts) VALUES (?, ?, ?)",
+                                 (event_id, username, time.time()))
+        return True
 
     @staticmethod
     def _out(r: dict) -> dict:
@@ -113,6 +138,7 @@ class EventQueries:
             "zones": json.loads(r.get("zones") or "[]"), "updated_ts": r["updated_ts"], "alert": alert,
             "feedback": {"verdict": r["f_verdict"], "label": r["f_label"], "note": r["f_note"] or ""}
                         if r.get("f_verdict") else None,
+            "kept": {"by": r["k_by"], "ts": r["k_ts"]} if r.get("k_ts") else None,
         }
 
     def close(self) -> None:

@@ -406,3 +406,31 @@ def test_recipients_come_from_accounts_with_env_fallback(tmp_path):
     n.directory.forget()
     n.send(Message("t", "b"), camera="drive")
     assert sent[-1] == ("A" * 30 + "," + "E" * 30, "S" * 30)
+
+
+def test_arm_schedule_acts_only_at_changes(tmp_path):
+    from bigbrother.alerts.arming import ArmSchedule
+    cfg = cfg_with(alerts={"timezone": "America/New_York",
+                           "arm_schedule": [{"start": "22:00", "end": "07:00"}]})
+    store = AlertStore(tmp_path / "db.sqlite")
+    noon = MON_NOON.timestamp()
+    now = [noon]
+    published = []
+    sched = ArmSchedule(cfg.alerts.arm_schedule, store, "America/New_York",
+                        lambda t, p, r: published.append(p), clock=lambda: now[0])
+    assert sched.tick() is False and not store.armed()        # new schedule applies at once
+    store.set_armed(True)                                      # turned on by hand at lunch...
+    now[0] = noon + 3600
+    assert sched.tick() is None and store.armed()              # ...and it stays on
+    now[0] = noon + 10 * 3600 + 60                             # 22:01: window starts
+    assert sched.tick() is True and store.armed()
+    store.set_armed(False)
+    now[0] += 3600
+    assert sched.tick() is None and not store.armed()          # manual off sticks overnight
+    now[0] = noon + 19 * 3600 + 60                             # 07:01 Tuesday: window ends
+    assert sched.tick() is False
+    assert published == ["off"]                                # nothing to announce when already right
+    # editing the schedule re-applies right away
+    cfg2 = cfg_with(alerts={"timezone": "America/New_York", "arm_schedule": [{"start": "06:00", "end": "09:00"}]})
+    sched2 = ArmSchedule(cfg2.alerts.arm_schedule, store, "America/New_York", clock=lambda: now[0])
+    assert sched2.tick() is True and store.armed()

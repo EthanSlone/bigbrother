@@ -106,6 +106,15 @@ class AlertStore:
             self._db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('armed', ?)",
                              ("1" if on else "0",))
 
+    def setting(self, key: str) -> str | None:
+        with self._lock:
+            row = self._db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+
     def close(self) -> None:
         with self._lock:
             self._db.close()

@@ -397,6 +397,16 @@ async function renderAlerts(panel) {
       <p class="error" role="alert" hidden></p>
       <div style="display:flex;gap:10px"><button class="btn" type="submit">Save token</button>
         ${ns.token_source === 'app' ? '<button class="btn quiet" type="button" id="clear">Remove token</button>' : ''}</div></form>
+    <form class="form" id="auto"><h3>Turn alerts on and off automatically</h3>
+      <p>Alerts turn on when a window starts and off when it ends, for example overnight and while you're at work.
+        The lamp still works in between: if you turn alerts off by hand, they stay off until the next start.</p>
+      <label class="field">Schedule<select name="mode"><option value="off">Off: only the lamp turns alerts on and off</option>
+        <option value="on" ${(al.arm_schedule || []).length ? 'selected' : ''}>On during these hours</option></select></label>
+      <div data-g="sched" ${(al.arm_schedule || []).length ? '' : 'hidden'}>${((al.arm_schedule || []).length ? al.arm_schedule
+        : [{days: DAYS, start: '22:00', end: '07:00'}]).map(schedRow).join('')}
+        <button type="button" class="btn quiet" data-addwin>Add another time window</button></div>
+      <p class="error" role="alert" hidden></p>
+      <div><button class="btn" type="submit">Save schedule</button></div></form>
     <form class="form" id="glob"><h3>For all cameras</h3>
       <label class="check"><input type="checkbox" name="verify" ${al.verify !== false ? 'checked' : ''}> Double-check with a second, larger model before alerting (fewer false alarms)</label>
       <label class="field">Time zone for schedules and alert times<select name="timezone">${tzs.map(t => `<option ${t === tz ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
@@ -416,6 +426,20 @@ async function renderAlerts(panel) {
     catch (ex) { formError($('.error', g), ex); }
   };
   for (const f of $$('form[data-cam]', panel)) wireAlertCard(f, cfg);
+  const au = $('#auto', panel), auSched = $('[data-g=sched]', au);
+  chipGroup(au);
+  au.mode.onchange = () => { auSched.hidden = au.mode.value !== 'on'; };
+  auSched.addEventListener('click', e => {
+    if (e.target.closest('[data-addwin]')) { e.target.closest('[data-addwin]').insertAdjacentHTML('beforebegin', schedRow({start: '09:00', end: '17:00'})); chipGroup(auSched); }
+    const rm = e.target.closest('[data-rmwin]'); if (rm && $$('.win', auSched).length > 1) rm.closest('.win').remove();
+  });
+  au.onsubmit = async e => {
+    e.preventDefault(); const err = $('.error', au); err.hidden = true;
+    const wins = au.mode.value === 'on' ? $$('.win', auSched).map(w => ({days: picked(w), start: $('[data-k=start]', w).value, end: $('[data-k=end]', w).value})) : null;
+    if (wins && wins.some(w => !w.days.length || !w.start || !w.end)) { formError(err, new Error('Each time window needs days and both times.')); return; }
+    try { await save('PUT', '/api/config/settings', {alerts: {arm_schedule: wins}}, wins ? 'Schedule saved: alerts follow it from now' : 'Schedule turned off'); }
+    catch (ex) { formError(err, ex); }
+  };
   const po = $('#po', panel);
   const putToken = async token => {
     try { await api('/api/notify/settings', {method: 'PUT', body: {token}}); toast(token ? 'App token saved' : 'App token removed'); renderAlerts(panel); }

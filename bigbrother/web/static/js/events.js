@@ -10,6 +10,7 @@ export async function mount(view, route, sh) {
   root = view; shell = sh;
   root.innerHTML = `<div class="events-layout">
     <aside class="filters" aria-label="Filters">
+      <button class="btn" id="f-toggle" aria-expanded="false" aria-controls="f-body">Filters</button><div class="f-body" id="f-body">
       <div><h3>Cameras</h3><div class="chips" id="f-cam"></div></div>
       <div><h3>Objects</h3><div class="chips" id="f-label"></div></div>
       <div><h3>Alerts</h3><div class="seg" id="f-alert">
@@ -18,7 +19,7 @@ export async function mount(view, route, sh) {
         <button data-v="" aria-pressed="true">All</button><button data-v="unreviewed" aria-pressed="false">To review</button><button data-v="false_alarm" aria-pressed="false">False alarms</button><button data-v="kept" aria-pressed="false">Kept</button></div></div>
       <div><h3>Day</h3><input type="date" id="f-day" aria-label="Show events from this day"></div>
       <button class="btn quiet" id="f-clear" hidden>Clear filters</button>
-    </aside>
+    </div></aside>
     <section><div id="feed"></div><div class="more"><button class="btn" id="more" hidden>Show older events</button></div></section>
   </div>
   <dialog class="sheet" id="sheet" aria-labelledby="sheet-title"></dialog>`;
@@ -35,10 +36,12 @@ export async function mount(view, route, sh) {
   for (const b of $$('#f-label .chip', root)) b.onclick = () => toggle(filters.labels, b);
   for (const b of $$('#f-alert button', root)) b.onclick = () => { filters.alert = b.dataset.v; apply(); };
   for (const b of $$('#f-review button', root)) b.onclick = () => { filters.review = b.dataset.v; apply(); };
-  shell.tools.innerHTML = isAdmin() ? '<a class="btn quiet" href="#/settings/feedback">Detection feedback</a>' : '';
+  shell.tools.innerHTML = isAdmin() ? '<a class="btn quiet wide-only" href="#/settings/feedback">Detection feedback</a>' : '';
   $('#f-day', root).onchange = e => { filters.day = e.target.value; apply(); };
   $('#f-clear', root).onclick = () => { filters = {cameras: new Set(), labels: new Set(), alert: '', day: '', review: ''}; apply(); };
   $('#more', root).onclick = () => load(false);
+  $('#f-toggle', root).onclick = e => { const open = e.currentTarget.getAttribute('aria-expanded') !== 'true';
+    e.currentTarget.setAttribute('aria-expanded', open); $('.filters', root).classList.toggle('open', open); };
   $('#feed', root).addEventListener('click', e => {
     const row = e.target.closest('[data-ev]');
     if (row) go(`#/events/${row.dataset.ev}${location.hash.includes('?') ? '?' + location.hash.split('?')[1] : ''}`);
@@ -104,7 +107,9 @@ function syncControls() {
   for (const b of $$('#f-alert button', root)) b.setAttribute('aria-pressed', b.dataset.v === filters.alert);
   for (const b of $$('#f-review button', root)) b.setAttribute('aria-pressed', b.dataset.v === filters.review);
   $('#f-day', root).value = filters.day;
-  $('#f-clear', root).hidden = !(filters.cameras.size || filters.labels.size || filters.alert || filters.day || filters.review);
+  const active = filters.cameras.size + filters.labels.size + !!filters.alert + !!filters.day + !!filters.review;
+  $('#f-clear', root).hidden = !active;
+  $('#f-toggle', root).textContent = active ? `Filters (${active})` : 'Filters';
 }
 
 function apply() {
@@ -195,10 +200,10 @@ async function openFromRoute(route) {
   const a = e.alert;
   sheet.innerHTML = `<div class="hd"><h2 id="sheet-title"><span class="kind k-${esc(e.label)}">${esc(labelName(e.label))}</span></h2>
       <span class="muted">${esc(camName(e.camera))}</span><div class="grow"></div>
-      <a class="btn quiet" href="#/recordings?cam=${encodeURIComponent(e.camera)}&t=${Math.floor(e.start_ts - 5)}">${ICON.recordings}Recordings</a>
-      <button class="btn quiet" id="keep" aria-pressed="${!!e.kept}" title="Kept events stay after old recordings are removed">${ICON.star}<span>${e.kept ? 'Kept' : 'Keep'}</span></button>
-      <a class="btn quiet" id="dl" href="/media/clip/${esc(e.id)}.mp4" download="${esc(e.camera)}-${esc(e.id)}.mp4">${ICON.download}Save clip</a>
-      ${isAdmin() ? `<button class="btn quiet" id="del" title="Delete this event">${ICON.trash}<span class="sr">Delete</span></button>` : ''}
+      <a class="btn quiet act" href="#/recordings?cam=${encodeURIComponent(e.camera)}&t=${Math.floor(e.start_ts - 5)}">${ICON.recordings}Recordings</a>
+      <button class="btn quiet act" id="keep" aria-pressed="${!!e.kept}" title="Kept events stay after old recordings are removed">${ICON.star}<span>${e.kept ? 'Kept' : 'Keep'}</span></button>
+      <a class="btn quiet act" id="dl" href="/media/clip/${esc(e.id)}.mp4" download="${esc(e.camera)}-${esc(e.id)}.mp4">${ICON.download}Save clip</a>
+      ${isAdmin() ? `<button class="btn quiet act" id="del" title="Delete this event">${ICON.trash}<span class="sr">Delete</span></button>` : ''}
       <button class="btn quiet" id="x" aria-label="Close">${ICON.close}</button></div>
     <video controls playsinline ${e.has_snapshot ? `poster="/media/snapshot/${esc(e.id)}.jpg?u=${e.updated_ts}"` : ''}></video>
     <p class="note" id="clipnote" hidden></p>

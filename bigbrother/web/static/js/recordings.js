@@ -21,12 +21,12 @@ export async function mount(view, route, sh) {
   root.innerHTML = `
     <div class="rec-bar">
       <select id="cam" aria-label="Camera">${state.cameras.length > 1 ? `<option value="${ALL}">All cameras</option>` : ''}${state.cameras.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select>
-      <button class="btn quiet" id="prev" aria-label="Previous day">${ICON.back}</button>
+      <span class="daynav"><button class="btn quiet" id="prev" aria-label="Previous day">${ICON.back}</button>
       <input type="date" id="day" aria-label="Day">
-      <button class="btn quiet" id="next" aria-label="Next day" style="transform:scaleX(-1)">${ICON.back}</button>
+      <button class="btn quiet" id="next" aria-label="Next day" style="transform:scaleX(-1)">${ICON.back}</button></span>
       <div class="seg" id="zoom" role="group" aria-label="Timeline zoom">${ZOOMS.map(z => `<button data-z="${z}" aria-pressed="${z === zoom}">${z} h</button>`).join('')}</div>
       <button class="btn" id="latest">Latest</button>
-      <div style="flex:1"></div>
+      <div class="spacer"></div>
       <button class="btn" id="miss" title="Something was in view here but wasn't detected">Report a missed detection</button>
       <button class="btn" id="save" title="Download 5 minutes starting at the playhead">${ICON.download}Save 5 minutes</button>
     </div>
@@ -228,7 +228,8 @@ function draw() {
   html += '<i class="hover" hidden></i><i class="head" hidden></i>';
   $('#scrub', root).innerHTML = html;
 
-  const step = zoom === 24 ? 3 * 3600 : zoom === 6 ? 3600 : 600;
+  const narrow = $('#scrub', root).clientWidth < 600;   // fewer labels on phones so they don't run together
+  const step = zoom === 24 ? (narrow ? 6 : 3) * 3600 : zoom === 6 ? (narrow ? 2 : 1) * 3600 : (narrow ? 1200 : 600);
   let ticks = '';
   for (let t = Math.ceil(a / step) * step; t <= b; t += step) {
     const p = pct(t); if (p < 3 || p > 97) continue;

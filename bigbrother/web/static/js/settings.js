@@ -679,7 +679,7 @@ function appSection() {
   const ios = /iPhone|iPad/.test(navigator.userAgent);
   const how = isInstalled() ? "<p><span class=\"dot ok\"></span>You're using the installed app.</p>"
     : installPrompt ? '<p>Install it to open BigBrother from your home screen, full screen, like any other app.</p><div><button class="btn primary" id="install">Install BigBrother</button></div>'
-    : ios ? '<p>To get an app icon: in Safari, tap Share, then <b>Add to Home Screen</b>.</p>'
+    : ios ? '<p>To get an app icon: tap Share (in Safari at the bottom, in Chrome at the top right of the address bar), then <b>Add to Home Screen</b>. Turn on <b>Open as Web App</b> if it\'s offered. The app keeps its own sign-in, so you\'ll sign in once more inside it.</p>'
     : '<p>To get an app icon: in Chrome, open the ⋮ menu and choose <b>Install app</b> (or <b>Add to Home screen</b>).</p>';
   return `${how}<p class="hint muted">With "Keep me signed in", this device stays signed in as long as you open BigBrother at least once
     every 30 days. Two-factor codes are only asked for when signing in on a new device. Always use the same address

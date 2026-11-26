@@ -64,7 +64,7 @@ Open **http://<server>:8090** (set `WEB_PORT` in `.env` to change it).
   downloads an MP4. **All cameras** plays every camera side by side on one clock, at 1×
   to 8×; select a camera to watch it alone from the same moment.
 - **Phone:** install it as an app. Android: the app offers **Install BigBrother** (or Chrome's
-  ⋮ menu → Install app). iPhone: Safari → Share → Add to Home Screen. It opens full screen
+  ⋮ menu → Install app). iPhone: Share → Add to Home Screen, in Safari or Chrome (then sign in once inside the app: it has its own sign-in). It opens full screen
   from its own icon, with shortcuts to Events and all-camera Recordings.
 
 **Behind your reverse proxy:** point it at port 8090, with WebSocket upgrades allowed

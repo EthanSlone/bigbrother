@@ -1,4 +1,4 @@
-import {$, $$, api, esc, state, camName, go, parseHash, ICON, labelName, timeOf, timeSec, dayName, duration, ALERT_TEXT, toast} from './app.js';
+import {$, $$, api, esc, state, camName, go, parseHash, isAdmin, ICON, labelName, timeOf, timeSec, dayName, duration, ALERT_TEXT, toast} from './app.js';
 
 const PAGE = 40;
 let root = null, shell = null, timer = null;
@@ -34,7 +34,7 @@ export async function mount(view, route, sh) {
   for (const b of $$('#f-label .chip', root)) b.onclick = () => toggle(filters.labels, b);
   for (const b of $$('#f-alert button', root)) b.onclick = () => { filters.alert = b.dataset.v; apply(); };
   for (const b of $$('#f-review button', root)) b.onclick = () => { filters.review = b.dataset.v; apply(); };
-  shell.tools.innerHTML = '<a class="btn quiet" href="#/settings/feedback">Detection feedback</a>';
+  shell.tools.innerHTML = isAdmin() ? '<a class="btn quiet" href="#/settings/feedback">Detection feedback</a>' : '';
   $('#f-day', root).onchange = e => { filters.day = e.target.value; apply(); };
   $('#f-clear', root).onclick = () => { filters = {cameras: new Set(), labels: new Set(), alert: '', day: '', review: ''}; apply(); };
   $('#more', root).onclick = () => load(false);
@@ -138,7 +138,7 @@ async function poll() {
 
 function alertBadge(a) {
   if (!a) return '';
-  const cls = a.status === 'sent' ? 'sent' : a.status === 'logged' ? 'logged' : a.status === 'failed' ? 'failed' : '';
+  const cls = {sent: 'sent', logged: 'logged', failed: 'failed', grouped: 'logged'}[a.status] || '';
   return `<span class="badge ${cls}">${esc(ALERT_TEXT[a.status] || a.status)}</span>`;
 }
 

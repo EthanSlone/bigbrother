@@ -96,6 +96,9 @@ services:
       # IP(s) of your reverse proxy, so login rate limiting sees real client addresses
       # and cookies are marked secure behind HTTPS. Comma-separated; CIDR allowed.
       BB_TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      # Only for the "Send a test" button when the token lives in .env rather than the app.
+      PUSHOVER_TOKEN: ${PUSHOVER_TOKEN:-}
+      PUSHOVER_USER: ${PUSHOVER_USER:-}
     volumes:
       - ./config:/config        # read-write: settings edited in the app are saved here
       - data:/data

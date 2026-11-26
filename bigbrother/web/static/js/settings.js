@@ -1,21 +1,24 @@
-import {$, $$, api, esc, state, go, toast, labelName, loadCameras, camName, ICON} from './app.js';
+import {$, $$, api, esc, state, go, toast, labelName, loadCameras, camName, ICON, isAdmin} from './app.js';
 
+// admin: only admins see the section (the server enforces it too).
 export const SECTIONS = {
   status: {title: 'System status', render: renderStatus},
-  cameras: {title: 'Cameras', render: renderCameras},
-  zones: {title: 'Zones and masks', render: renderZones},
-  alerts: {title: 'Alerts', render: renderAlerts},
-  recording: {title: 'Recording', render: renderRecording},
-  feedback: {title: 'Detection feedback', render: renderFeedback},
-  account: {title: 'Account', render: renderAccount},
+  cameras: {title: 'Cameras', render: renderCameras, admin: true},
+  zones: {title: 'Zones and masks', render: renderZones, admin: true},
+  alerts: {title: 'Alerts', render: renderAlerts, admin: true},
+  recording: {title: 'Recording', render: renderRecording, admin: true},
+  feedback: {title: 'Detection feedback', render: renderFeedback, admin: true},
+  users: {title: 'People', render: renderUsers, admin: true},
+  account: {title: 'Your account', render: renderAccount},
 };
+const visible = () => Object.fromEntries(Object.entries(SECTIONS).filter(([, v]) => !v.admin || isAdmin()));
 
 let root, shell, timer, cleanup = null;
 
 export async function mount(view, route, sh) {
   root = view; shell = sh;
   root.innerHTML = `<div class="settings"><nav class="subnav" aria-label="Settings sections">
-      ${Object.entries(SECTIONS).map(([k, s]) => `<a href="#/settings/${k}" data-s="${k}">${esc(s.title)}</a>`).join('')}
+      ${Object.entries(visible()).map(([k, s]) => `<a href="#/settings/${k}" data-s="${k}">${esc(s.title)}</a>`).join('')}
     </nav><div class="panel" id="panel"></div></div>`;
   show(route);
 }
@@ -25,7 +28,7 @@ export function unmount() { clearInterval(timer); if (cleanup) cleanup(); root =
 function show(route) {
   clearInterval(timer);
   if (cleanup) { cleanup(); cleanup = null; }
-  const key = SECTIONS[route.parts[0]] ? route.parts[0] : 'status';
+  const key = visible()[route.parts[0]] ? route.parts[0] : 'status';
   for (const a of $$('.subnav a', root)) {
     if (a.dataset.s === key) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
@@ -378,21 +381,49 @@ async function renderAlerts(panel) {
   const tz = al.timezone || 'UTC';
   let tzs = Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : [];
   if (!tzs.includes(tz)) tzs = [tz, ...tzs];   // browsers list some zones under another name
+  const ns = await api('/api/notify/settings');
   panel.innerHTML = `<h2>Alerts</h2>
     <p>The lamp at the top turns all phone alerts on or off. These rules decide which events become alerts while it's on.</p>
+    <form class="form" id="po"><h3>Pushover</h3>
+      <p>Alerts go to phones through <a href="https://pushover.net" target="_blank" rel="noopener">Pushover</a>
+        (one-time purchase per person; iPhone and Android). On pushover.net, create an application named BigBrother and paste its API token here.
+        Each person then adds their own user key under Your account.</p>
+      <p>${ns.token_source === 'app' ? '<span class="dot ok"></span>App token saved.' : ns.token_source === 'env'
+        ? '<span class="dot ok"></span>Using the token from the server\'s .env file.' : '<span class="dot warn"></span>No app token yet: alerts are only logged.'}
+        ${ns.people.length ? `Alerts go to ${ns.people.map(r => `<b>${esc(r.name)}</b>${r.cameras ? ` (${r.cameras.length} camera${r.cameras.length === 1 ? '' : 's'})` : ''}`).join(', ')}.`
+          : 'Nobody has added their Pushover key yet.'}</p>
+      <label class="field">App token<input type="password" name="token" autocomplete="off" spellcheck="false"
+        placeholder="${ns.token_source === 'app' ? 'saved; paste a new one to replace it' : '30 letters and numbers'}"></label>
+      <p class="error" role="alert" hidden></p>
+      <div style="display:flex;gap:10px"><button class="btn" type="submit">Save token</button>
+        ${ns.token_source === 'app' ? '<button class="btn quiet" type="button" id="clear">Remove token</button>' : ''}</div></form>
     <form class="form" id="glob"><h3>For all cameras</h3>
       <label class="check"><input type="checkbox" name="verify" ${al.verify !== false ? 'checked' : ''}> Double-check with a second, larger model before alerting (fewer false alarms)</label>
       <label class="field">Time zone for schedules and alert times<select name="timezone">${tzs.map(t => `<option ${t === tz ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
+      <label class="field">One alert per visit<select name="group">${[[0, 'Off: alert for every camera'], [30, 'Same object on another camera within 30 seconds'],
+        [90, 'Same object on another camera within 90 seconds'], [180, 'Same object on another camera within 3 minutes']].map(([v, t]) =>
+        `<option value="${v}" ${(al.group_seconds ?? 90) === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <label class="field">Address of this app from outside, for the link in each alert
+        <input type="url" name="public_url" value="${esc(al.public_url || '')}" placeholder="https://nvr.example.com" autocomplete="off"></label>
       <p class="error" role="alert" hidden></p>
       <div><button class="btn" type="submit">Save</button></div></form>
     ${Object.entries(raw.cameras || {}).map(([id, c]) => alertCard(id, c, defAlert, cfg)).join('')}`;
   const g = $('#glob', panel);
   g.onsubmit = async e => {
     e.preventDefault();
-    try { await save('PUT', '/api/config/settings', {alerts: {verify: g.verify.checked, timezone: g.timezone.value}}, 'Alert settings saved'); }
+    try { await save('PUT', '/api/config/settings', {alerts: {verify: g.verify.checked, timezone: g.timezone.value,
+      group_seconds: +g.group.value, public_url: g.public_url.value.trim().replace(/\/+$/, '')}}, 'Alert settings saved'); }
     catch (ex) { formError($('.error', g), ex); }
   };
   for (const f of $$('form[data-cam]', panel)) wireAlertCard(f, cfg);
+  const po = $('#po', panel);
+  const putToken = async token => {
+    try { await api('/api/notify/settings', {method: 'PUT', body: {token}}); toast(token ? 'App token saved' : 'App token removed'); renderAlerts(panel); }
+    catch (ex) { formError($('.error', po), ex); }
+  };
+  po.onsubmit = e => { e.preventDefault(); if (po.token.value.trim()) putToken(po.token.value.trim()); };
+  const clr = $('#clear', po);
+  if (clr) clr.onclick = () => confirm('Remove the app token? Alerts will only be logged until a new one is added.') && putToken('');
 }
 
 function alertCard(id, c, defAlert, cfg) {
@@ -530,35 +561,200 @@ async function renderFeedback(panel, _r, setTimer) {
   };
 }
 
-// ---------- account ----------
-function renderAccount(panel) {
-  panel.innerHTML = `<h2>Account</h2>
-    <p>Signed in as <b>${esc(state.user)}</b>.</p>
+// ---------- people (admin) ----------
+const ROLE_TEXT = {admin: 'Admin: everything, including settings and people',
+                   member: 'Member: watch, review events, turn alerts on and off'};
+const ago = ts => {
+  if (!ts) return 'never';
+  const m = Math.round((Date.now() / 1000 - ts) / 60);
+  return m < 2 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
+};
+async function renderUsers(panel) {
+  let users;
+  try { users = await api('/api/users'); } catch { return; }
+  panel.innerHTML = `<h2>People</h2>
+    <p>Everyone in the house can have their own sign-in. Members can watch, review events and turn alerts on and off;
+      only admins can change settings or manage people.</p>
+    <div class="rows">${users.map(u => `<div class="row"><div class="t"><b>${esc(u.username)}${u.username === state.user ? ' (you)' : ''}</b>
+        <span>${u.role === 'admin' ? 'Admin' : 'Member'}. ${u.twofa ? 'Two-factor on' : 'Two-factor off'}.
+          ${u.devices ? `Signed in on ${u.devices} device${u.devices > 1 ? 's' : ''}, last active ${ago(u.last_seen)}.` : 'Not signed in anywhere.'}</span></div>
+        <button class="btn" data-edit="${esc(u.username)}">Manage</button></div>`).join('')}</div>
+    <form class="form" id="adduser" autocomplete="off">
+      <h3>Add a person</h3>
+      <div class="two"><label class="field">Username<input type="text" name="username" required autocapitalize="none" spellcheck="false"></label>
+        <label class="field">Starting password<input type="text" name="password" required minlength="10" autocomplete="off"></label></div>
+      <label class="field">Role<select name="role"><option value="member">${ROLE_TEXT.member}</option><option value="admin">${ROLE_TEXT.admin}</option></select></label>
+      <p>Give them the password in person; they can change it under Your account.</p>
+      <p class="error" role="alert" hidden></p>
+      <div><button class="btn primary" type="submit">Add person</button></div>
+    </form>
+    <dialog class="sheet" id="udlg" style="width:min(520px,94vw)"></dialog>`;
+  const f = $('#adduser', panel);
+  f.onsubmit = async e => {
+    e.preventDefault();
+    try {
+      await api('/api/users', {method: 'POST', body: {username: f.username.value.trim(), password: f.password.value, role: f.role.value}});
+      toast(`${f.username.value.trim()} added`); renderUsers(panel);
+    } catch (ex) { formError($('.error', f), ex); }
+  };
+  const dlg = $('#udlg', panel);
+  for (const b of $$('[data-edit]', panel)) b.onclick = () => {
+    const u = users.find(x => x.username === b.dataset.edit);
+    dlg.innerHTML = `<form class="form" style="padding:20px" method="dialog">
+      <h2 style="font-size:var(--step-1);margin:0">${esc(u.username)}</h2>
+      <label class="field">Role<select name="role">${['member', 'admin'].map(r => `<option value="${r}" ${u.role === r ? 'selected' : ''}>${ROLE_TEXT[r]}</option>`).join('')}</select></label>
+      <label class="field">Set a new password (optional)<input type="text" name="password" minlength="10" autocomplete="off" placeholder="leave empty to keep theirs"></label>
+      ${u.twofa ? '<label class="check"><input type="checkbox" name="reset2fa"> Turn off their two-factor sign-in (lost phone). Signs them out everywhere.</label>' : ''}
+      <p class="error" role="alert" hidden></p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" value="save">Save</button><button class="btn quiet" value="cancel">Cancel</button>
+        <span style="flex:1"></span>${u.username !== state.user ? '<button class="btn" type="button" id="rm">Remove</button>' : ''}</div></form>`;
+    const df = $('form', dlg), err = $('.error', df);
+    df.onsubmit = async e => {
+      if (e.submitter && e.submitter.value === 'cancel') return;
+      e.preventDefault();
+      const body = {};
+      if (df.role.value !== u.role) body.role = df.role.value;
+      if (df.password.value) body.password = df.password.value;
+      if (df.reset2fa && df.reset2fa.checked) body.reset_twofa = true;
+      try { if (Object.keys(body).length) await api(`/api/users/${encodeURIComponent(u.username)}`, {method: 'PUT', body});
+        dlg.close(); toast('Saved'); renderUsers(panel); }
+      catch (ex) { formError(err, ex); }
+    };
+    const rm = $('#rm', df);
+    if (rm) rm.onclick = async () => {
+      if (!confirm(`Remove ${u.username}? They're signed out immediately.`)) return;
+      try { await api(`/api/users/${encodeURIComponent(u.username)}`, {method: 'DELETE'}); dlg.close(); renderUsers(panel); }
+      catch (ex) { formError(err, ex); }
+    };
+    dlg.showModal();
+  };
+}
+
+// ---------- your account ----------
+function phoneAlerts(m) {
+  const all = m.cameras == null;
+  return `<form class="form" id="phone"><h3>Phone alerts</h3>
+    ${m.ready ? '' : `<p><span class="dot warn"></span>${isAdmin() ? 'First add the Pushover app token under <a href="#/settings/alerts">Alerts</a>.'
+      : 'An admin needs to finish setting up Pushover before alerts can reach your phone. You can add your key now.'}</p>`}
+    <p>Install the Pushover app on your phone and sign in. Your user key is at the top of
+      <a href="https://pushover.net" target="_blank" rel="noopener">pushover.net</a> once you're signed in.</p>
+    <label class="field">Your Pushover user key<input type="text" name="key" value="${esc(m.pushover_user)}" autocomplete="off"
+      spellcheck="false" autocapitalize="none" placeholder="30 letters and numbers"></label>
+    <fieldset class="field"><legend>Cameras that alert me</legend>
+      <label class="check"><input type="checkbox" name="all" ${all ? 'checked' : ''}> Every camera, including ones added later</label>
+      <div class="chips" id="pcams" ${all ? 'hidden' : ''}>${state.cameras.map(c => chip(c.id, all || m.cameras.includes(c.id), esc(c.name))).join('')}</div>
+    </fieldset>
+    <label class="check"><input type="checkbox" name="health" ${m.health ? 'checked' : ''}> Also tell me when something's wrong (a camera stops recording, the disk is filling up)</label>
+    <p class="hint muted">The lamp at the top still turns alerts on and off for everyone; the rules for each camera are under Alerts.</p>
+    <p class="error" role="alert" hidden></p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" type="submit">Save</button>
+      <button class="btn" type="button" id="ptest" ${m.pushover_user && m.ready ? '' : 'disabled'}>Send me a test</button></div></form>`;
+}
+
+function wirePhoneAlerts(f, m) {
+  const err = $('.error', f), cams = $('#pcams', f);
+  chipGroup(cams);
+  f.all.onchange = () => { cams.hidden = f.all.checked; };
+  f.onsubmit = async e => {
+    e.preventDefault(); err.hidden = true;
+    const body = {pushover_user: f.key.value.trim(), health: f.health.checked, cameras: f.all.checked ? null : picked(cams)};
+    if (body.cameras && !body.cameras.length && body.pushover_user) { formError(err, new Error('Pick at least one camera, or remove your key to stop alerts.')); return; }
+    try {
+      const r = await api('/api/me/notify', {method: 'PUT', body});
+      $('#ptest', f).disabled = !(r.pushover_user && r.ready);
+      toast(r.pushover_user ? `Saved${r.note && r.note.startsWith('devices') ? ` (${r.note})` : ''}` : 'Saved. Alerts won\'t reach your phone without a key.', 4000);
+    } catch (ex) { formError(err, ex); }
+  };
+  $('#ptest', f).onclick = async ev => {
+    err.hidden = true; ev.target.disabled = true;
+    try { await api('/api/me/notify/test', {method: 'POST'}); toast('Test sent. It should arrive in a few seconds.'); }
+    catch (ex) { formError(err, ex); }
+    finally { setTimeout(() => { ev.target.disabled = false; }, 10000); }
+  };
+}
+
+async function renderAccount(panel) {
+  let devices = [], mine = null;
+  try { [devices, mine] = await Promise.all([api('/api/me/devices'), api('/api/me/notify')]); } catch { /* shown without */ }
+  const ua = s => /iPhone|iPad/.test(s) ? 'iPhone or iPad' : /Android/.test(s) ? 'Android phone' : /Mac OS/.test(s) ? 'Mac'
+    : /Windows/.test(s) ? 'Windows PC' : /Linux/.test(s) ? 'Linux computer' : 'Browser';
+  panel.innerHTML = `<h2>Your account</h2>
+    <p>Signed in as <b>${esc(state.user)}</b> (${state.role === 'admin' ? 'admin' : 'member'}).</p>
+    ${mine ? phoneAlerts(mine) : ''}
+    <section class="form" id="twofa">
+      <h3>Two-factor sign-in</h3>
+      ${state.twofa
+        ? `<p><span class="dot ok"></span>On. Signing in on a new device asks for a code from your authenticator app.</p>
+           <form class="form" id="off" style="gap:12px"><label class="field">Your password, to turn it off<input type="password" name="password" autocomplete="current-password" required></label>
+             <p class="error" role="alert" hidden></p><div><button class="btn" type="submit">Turn off two-factor</button></div></form>`
+        : `<p>Recommended now that BigBrother can be reached from the internet: even with your password, nobody can sign in without your phone.
+             Works with any authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Authy…).</p>
+           <div><button class="btn primary" id="on" type="button">Set up two-factor</button></div>`}
+    </section>
     <form class="form" id="pw" autocomplete="on">
       <h3>Change password</h3>
       <input type="text" name="username" value="${esc(state.user)}" autocomplete="username" hidden>
       <label class="field">Current password<input type="password" name="current" autocomplete="current-password" required></label>
       <label class="field">New password<input type="password" name="new" autocomplete="new-password" required minlength="10"></label>
       <label class="field">Repeat new password<input type="password" name="new2" autocomplete="new-password" required></label>
-      <p>At least 10 characters. Changing it signs you out on every other device.</p>
+      <p class="hint muted">At least 10 characters. Changing it signs you out on every other device.</p>
       <p class="error" role="alert" hidden></p>
       <div><button class="btn primary" type="submit">Change password</button></div>
     </form>
-    <div><h3>Sign out</h3><p style="margin-bottom:10px">Sign out of BigBrother on this device.</p>
-      <button class="btn" id="logout">Sign out</button></div>`;
-  const form = $('#pw', panel), err = $('.error', form);
-  form.onsubmit = async e => {
+    <section><h3>Where you're signed in</h3>
+      <div class="rows">${devices.map(d => `<div class="row"><div class="t"><b>${esc(ua(d.user_agent))}${d.current ? ' (this device)' : ''}</b>
+        <span>Last active ${ago(d.last_seen)}${d.ip ? `, from ${esc(d.ip)}` : ''}</span></div><span></span></div>`).join('')}</div>
+      <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
+        ${devices.length > 1 ? '<button class="btn" id="others">Sign out other devices</button>' : ''}
+        <button class="btn" id="logout">Sign out here</button></div></section>`;
+  if (mine) wirePhoneAlerts($('#phone', panel), mine);
+  const pw = $('#pw', panel), err = $('.error', pw);
+  pw.onsubmit = async e => {
     e.preventDefault();
-    const f = Object.fromEntries(new FormData(form));
+    const f = Object.fromEntries(new FormData(pw));
     err.hidden = true;
     if (f.new !== f.new2) { err.textContent = "The new passwords don't match."; err.hidden = false; return; }
-    try {
-      await api('/api/password', {method: 'POST', body: {current: f.current, new: f.new}});
-      form.reset(); toast('Password changed');
-    } catch (ex) { err.textContent = ex.message; err.hidden = false; }
+    try { await api('/api/password', {method: 'POST', body: {current: f.current, new: f.new}}); pw.reset(); toast('Password changed'); }
+    catch (ex) { formError(err, ex); }
   };
-  $('#logout', panel).onclick = async () => {
-    await api('/api/logout', {method: 'POST'}).catch(() => {});
-    location.hash = ''; location.reload();
+  const others = $('#others', panel);
+  if (others) others.onclick = async () => { const r = await api('/api/me/devices/sign-out-others', {method: 'POST'});
+    toast(`Signed out ${r.signed_out} other device${r.signed_out === 1 ? '' : 's'}`); renderAccount(panel); };
+  $('#logout', panel).onclick = async () => { await api('/api/logout', {method: 'POST'}).catch(() => {}); location.hash = ''; location.reload(); };
+  const off = $('#off', panel);
+  if (off) off.onsubmit = async e => {
+    e.preventDefault();
+    try { await api('/api/me/2fa/disable', {method: 'POST', body: {password: off.password.value}}); state.twofa = false; toast('Two-factor sign-in is off'); renderAccount(panel); }
+    catch (ex) { formError($('.error', off), ex); }
+  };
+  const on = $('#on', panel);
+  if (on) on.onclick = async () => {
+    const b = await api('/api/me/2fa/begin', {method: 'POST'});
+    const sec = $('#twofa', panel);
+    sec.innerHTML = `<h3>Set up two-factor sign-in</h3>
+      <div class="enrol"><div class="qr">${b.qr}</div><div class="form" style="gap:12px">
+        <p>1. In your authenticator app, add an account and scan this code.<br>
+           On this phone? <a href="${esc(b.uri)}">Open in your authenticator app</a>, or type the key:</p>
+        <code class="key">${esc(b.secret.replace(/(.{4})/g, '$1 ').trim())}</code>
+        <form class="form" id="confirm" style="gap:12px"><label class="field">2. Enter the 6-digit code it shows
+          <input type="text" name="code" class="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required></label>
+          <p class="error" role="alert" hidden></p><div><button class="btn primary" type="submit">Turn on</button></div></form>
+      </div></div>`;
+    const cf = $('#confirm', sec);
+    $('input', cf).focus();
+    cf.onsubmit = async e => {
+      e.preventDefault();
+      try {
+        const r = await api('/api/me/2fa/confirm', {method: 'POST', body: {code: cf.code.value}});
+        state.twofa = true;
+        sec.innerHTML = `<h3>Two-factor sign-in is on</h3>
+          <p>Save these recovery codes somewhere safe (a password manager, or printed). Each one gets you in once if you lose your phone.
+            They won't be shown again.</p>
+          <div class="recovery">${r.recovery_codes.map(c => `<code>${esc(c)}</code>`).join('')}</div>
+          <div style="display:flex;gap:10px"><button class="btn" id="copy">Copy codes</button><button class="btn primary" id="done">I've saved them</button></div>`;
+        $('#copy', sec).onclick = () => navigator.clipboard.writeText(r.recovery_codes.join('\n')).then(() => toast('Copied'));
+        $('#done', sec).onclick = () => renderAccount(panel);
+      } catch (ex) { formError($('.error', cf), ex); }
+    };
   };
 }

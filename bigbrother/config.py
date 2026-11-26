@@ -121,6 +121,7 @@ class AlertSettings:
     threads: int = 0                      # inference threads for the verifier (0 = auto)
     health_enabled: bool = True           # alert when a camera stops recording, disk fills, ...
     health_after_minutes: int = 5         # how long a problem must last before it's reported
+    group_seconds: int = 90               # one alert per visit: same object on another camera within this
 
 
 @dataclass(frozen=True)
@@ -427,7 +428,7 @@ def _alert_settings(raw: Any) -> AlertSettings:
     if not isinstance(raw, dict):
         raise ConfigError("alerts must be a mapping")
     unknown = set(raw) - {"enabled", "notifier", "timezone", "verify", "verify_model", "verify_threshold",
-                          "public_url", "pushover", "threads", "health"}
+                          "public_url", "pushover", "threads", "health", "group_seconds"}
     if unknown:
         raise ConfigError(f"alerts: unknown key(s) {sorted(unknown)}")
     notifier = str(raw.get("notifier", "pushover"))
@@ -461,6 +462,7 @@ def _alert_settings(raw: Any) -> AlertSettings:
         threads=_as_int(raw.get("threads", 0), "alerts.threads", 0),
         health_enabled=bool(health.get("enabled", True)),
         health_after_minutes=int(_number(health.get("after_minutes", 5), "alerts.health.after_minutes", 1, 1440)),
+        group_seconds=int(_number(raw.get("group_seconds", 90), "alerts.group_seconds", 0, 900)),
     )
 
 

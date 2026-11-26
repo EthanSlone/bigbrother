@@ -11,7 +11,8 @@
     python -m bigbrother evaluate    run clips through detection offline and count events
     python -m bigbrother evaluate-testset ZIP   score detection settings on an exported test set
     python -m bigbrother web         run the web app (login, live view, events, recordings)
-    python -m bigbrother user ...    manage app accounts: list | add NAME | passwd NAME | delete NAME
+    python -m bigbrother user ...    manage app accounts: list | add NAME | passwd NAME | delete NAME |
+                                     role NAME admin|member | reset-2fa NAME
 """
 
 from __future__ import annotations
@@ -119,7 +120,7 @@ def _alerter(args) -> int:
 def _test_alert(args) -> int:
     from .alerts.service import send_test
 
-    return send_test(load_config(args.config))
+    return send_test(load_config(args.config), Path(args.data))
 
 
 def _models(args) -> int:
@@ -196,19 +197,31 @@ def _user(args) -> int:
     try:
         if args.action == "list":
             for u in users.list():
-                print(u.username)
+                print(f"{u.username}  {u.role}{'  (two-factor)' if u.twofa else ''}")
             return 0
         if not args.name:
             print("Give a username.")
             return 1
         if args.action == "add":
-            users.add(args.name, _read_password(f"Password for {args.name}: "))
+            users.add(args.name, _read_password(f"Password for {args.name}: "),
+                      "admin" if users.count() == 0 else "member")
             print(f"Added {args.name}.")
         elif args.action == "passwd":
             users.set_password(args.name, _read_password(f"New password for {args.name}: "))
             print(f"Password changed; {args.name} is signed out everywhere.")
         elif args.action == "delete":
             print(f"Deleted {args.name}." if users.delete(args.name) else f"No user {args.name}.")
+        elif args.action == "role":
+            users.set_role(args.name, args.value or "")
+            print(f"{args.name} is now {args.value}.")
+        elif args.action == "reset-2fa":
+            u = users.get(args.name)
+            if u is None:
+                print(f"No user {args.name}.")
+                return 1
+            users.totp_disable(args.name)
+            users.end_all_sessions(u)
+            print(f"Two-factor sign-in is off for {args.name}; they're signed out everywhere.")
         return 0
     except AuthError as exc:
         print(f"ERROR: {exc}")
@@ -251,6 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     al.set_defaults(func=_alerter)
 
     ta = sub.add_parser("test-alert", help="send one test notification")
+    ta.add_argument("--data", default="/data")
     ta.set_defaults(func=_test_alert)
 
     ev = sub.add_parser("evaluate", help="run clips through detection and count events")
@@ -284,8 +298,9 @@ def main(argv: list[str] | None = None) -> int:
     w.set_defaults(func=_web)
 
     us = sub.add_parser("user", help="manage app accounts")
-    us.add_argument("action", choices=["list", "add", "passwd", "delete"])
+    us.add_argument("action", choices=["list", "add", "passwd", "delete", "role", "reset-2fa"])
     us.add_argument("name", nargs="?")
+    us.add_argument("value", nargs="?", help="for role: admin or member")
     us.add_argument("--data", default="/data")
     us.set_defaults(func=_user)
 

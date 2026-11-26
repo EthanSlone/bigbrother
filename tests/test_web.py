@@ -111,7 +111,7 @@ def test_api_requires_login_and_setup_code(tmp_path):
             assert (await c.get("/media/snapshot/x.jpg")).status == 401
             assert (await c.get("/")).status == 200                      # app shell is public
             s = await (await c.get("/api/session")).json()
-            assert s == {"user": None, "setup": True, "version": s["version"]}
+            assert s == {"user": None, "role": None, "twofa": False, "setup": True, "version": s["version"]}
             body = {"code": "WRONG-CODE", "username": "ethan", "password": PW}
             assert (await c.post("/api/setup", json=body)).status == 403            # no header
             assert (await c.post("/api/setup", json=body, headers=H)).status == 403  # wrong code
@@ -302,3 +302,134 @@ def test_feedback_misses_and_export(tmp_path):
         {"e0": "false_alarm", "e2": "wrong_label", "e1": None}
     assert m["missed"][0]["note"] == "by the fence"
     assert "rtsp" not in _json.dumps(m)                               # no stream addresses
+
+
+
+def test_totp_matches_rfc6238_vector():
+    import base64
+    from bigbrother.web.auth import totp_match
+    secret = base64.b32encode(b"12345678901234567890").decode()
+    assert totp_match(secret, "287082", now=59) is not None     # RFC 6238, T=59, last 6 digits
+    assert totp_match(secret, "287083", now=59) is None
+    assert totp_match(secret, "287082", now=59 + 300) is None   # long expired
+
+
+def test_roles_and_two_factor_sign_in(tmp_path):
+    import time as _t
+    from bigbrother.web.app import create_app
+    from bigbrother.web.auth import _hotp
+    ctx = _ctx(tmp_path)
+    ctx.users.add("ethan", PW, "admin")
+
+    async def go():
+        async with TestClient(TestServer(create_app(ctx))) as admin, TestClient(TestServer(create_app(ctx))) as kid:
+            await admin.post("/api/login", json={"username": "ethan", "password": PW}, headers=H)
+            r = await admin.post("/api/users", json={"username": "sam", "password": PW + "2", "role": "member"},
+                                 headers=H)
+            assert r.status == 200
+            await kid.post("/api/login", json={"username": "sam", "password": PW + "2"}, headers=H)
+            assert (await (await kid.get("/api/session")).json())["role"] == "member"
+            # members watch and review, but can't change settings or accounts
+            assert (await kid.get("/api/events")).status == 200
+            assert (await kid.post("/api/armed", json={"armed": True}, headers=H)).status == 200
+            for method, path in (("GET", "/api/users"), ("GET", "/api/config"),
+                                 ("PUT", "/api/config/cameras/front"), ("POST", "/api/testset")):
+                r = await kid.request(method, path, json={}, headers=H)
+                assert r.status == 403, (method, path)
+            # the last admin can't be demoted or removed
+            r = await admin.put("/api/users/ethan", json={"role": "member"}, headers=H)
+            assert r.status == 400
+            assert (await admin.delete("/api/users/ethan", headers=H)).status == 400
+
+            # sam turns on two-factor
+            begin = await (await kid.post("/api/me/2fa/begin", headers=H)).json()
+            assert begin["uri"].startswith("otpauth://totp/") and "<svg" in begin["qr"]
+            step = int(_t.time() // 30)
+            r = await kid.post("/api/me/2fa/confirm", json={"code": _hotp(begin["secret"], step)}, headers=H)
+            codes = (await r.json())["recovery_codes"]
+            assert r.status == 200 and len(codes) == 8
+        async with TestClient(TestServer(create_app(ctx))) as c:
+            r = await (await c.post("/api/login", json={"username": "sam", "password": PW + "2"}, headers=H)).json()
+            assert r["need_code"] and "bb_session" not in c.session.cookie_jar.filter_cookies(c.make_url("/"))
+            bad = await c.post("/api/login/code", json={"ticket": r["ticket"], "code": "000000"}, headers=H)
+            assert bad.status == 401
+            # the code used to turn it on can't be replayed; a recovery code works once
+            ok = await c.post("/api/login/code", json={"ticket": r["ticket"], "code": codes[0]}, headers=H)
+            assert ok.status == 200 and (await (await c.get("/api/session")).json())["twofa"]
+            r = await (await c.post("/api/login", json={"username": "sam", "password": PW + "2"}, headers=H)).json()
+            again = await c.post("/api/login/code", json={"ticket": r["ticket"], "code": codes[0]}, headers=H)
+            assert again.status == 401
+    _run(go())
+
+
+def test_phone_alert_settings(tmp_path, monkeypatch):
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from bigbrother.alerts.recipients import Directory
+    from bigbrother.web.app import create_app
+
+    hits = []
+
+    class Pushover(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"])).decode(errors="ignore")
+            hits.append((self.path, body))
+            if self.path.endswith("validate.json"):
+                good = "G" * 30 in body
+                bad_token = "X" * 30 in body
+                code = 200 if good and not bad_token else 400
+                out = {"status": 1, "devices": ["iphone"]} if code == 200 else \
+                    {"status": 0, "errors": ["application token is invalid" if bad_token else "user key is invalid"]}
+            else:
+                code, out = 200, {"status": 1, "request": "r1"}
+            data = _json.dumps(out).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Pushover)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    monkeypatch.setenv("BB_PUSHOVER_URL", f"http://127.0.0.1:{srv.server_port}/1/messages.json")
+    monkeypatch.delenv("PUSHOVER_TOKEN", raising=False)
+    monkeypatch.delenv("PUSHOVER_USER", raising=False)
+    ctx = _ctx(tmp_path)
+    ctx.users.add("ethan", PW, "admin")
+    ctx.users.add("sam", PW, "member")
+
+    async def go():
+        async with TestClient(TestServer(create_app(ctx))) as admin, TestClient(TestServer(create_app(ctx))) as kid:
+            await admin.post("/api/login", json={"username": "ethan", "password": PW}, headers=H)
+            await kid.post("/api/login", json={"username": "sam", "password": PW}, headers=H)
+            mine = await (await kid.get("/api/me/notify")).json()
+            assert mine == {"pushover_user": "", "cameras": None, "health": True, "ready": False}
+            assert (await kid.put("/api/notify/settings", json={"token": "T" * 30}, headers=H)).status == 403
+            r = await admin.put("/api/notify/settings", json={"token": "X" * 30}, headers=H)
+            assert r.status == 400 and "rejected" in (await r.json())["error"]
+            r = await admin.put("/api/notify/settings", json={"token": "T" * 30}, headers=H)
+            assert (await r.json())["token_source"] == "app"
+            # keys are checked with Pushover before they're saved
+            r = await kid.put("/api/me/notify", json={"pushover_user": "B" * 30}, headers=H)
+            assert r.status == 400 and "recognise" in (await r.json())["error"]
+            r = await kid.put("/api/me/notify", json={"pushover_user": "G" * 30, "cameras": ["front"],
+                                                      "health": False}, headers=H)
+            got = await r.json()
+            assert r.status == 200 and got["ready"] and got["cameras"] == ["front"] and "iphone" in got["note"]
+            assert (await kid.put("/api/me/notify", json={"cameras": ["nope"]}, headers=H)).status == 400
+            r = await kid.post("/api/me/notify/test", headers=H)
+            assert r.status == 200
+            assert (await kid.post("/api/me/notify/test", headers=H)).status == 429
+            people = (await (await admin.get("/api/notify/settings")).json())["people"]
+            assert people == [{"name": "sam", "cameras": ["front"], "health": False}]
+
+    _run(go())
+    srv.shutdown()
+    msg = [b for p, b in hits if p.endswith("messages.json")]
+    assert len(msg) == 1 and "G" * 30 in msg[0] and "T" * 30 in msg[0]
+    token, people = Directory(tmp_path / "web.db", {}).load()
+    assert token == "T" * 30 and people[0].cameras == frozenset({"front"}) and not people[0].health

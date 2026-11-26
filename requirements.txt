@@ -9,3 +9,4 @@ opencv-python-headless>=4.10
 openvino>=2025.0
 onnxruntime>=1.20
 tzdata>=2024.1  # time zones for alert schedules (slim images lack system tzdata)
+segno>=1.6,<2   # QR code for two-factor setup

@@ -13,6 +13,8 @@ import ipaddress
 import json
 import logging
 import os
+import secrets
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -29,8 +31,18 @@ log = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
 COOKIE = "bb_session"
 CSRF_HEADER = "X-BigBrother"       # custom header: browsers won't send it cross-site without CORS
-PUBLIC = {"/", "/index.html", "/manifest.webmanifest", "/sw.js", "/api/session", "/api/login", "/api/setup"}
-VERSION = "1"
+PUBLIC = {"/", "/index.html", "/manifest.webmanifest", "/sw.js", "/api/session", "/api/login", "/api/login/code",
+          "/api/setup"}
+VERSION = "2"
+
+# What members (non-admins) can't do: change settings, manage accounts, delete events, export.
+ADMIN_ONLY_PREFIXES = ("/api/config", "/api/users", "/api/testset", "/media/testset", "/api/notify/settings")
+
+
+def admin_only(method: str, path: str) -> bool:
+    if path.startswith(ADMIN_ONLY_PREFIXES):
+        return True
+    return method == "DELETE" and path.startswith("/api/events/") and not path.endswith("/feedback")
 
 
 def _nets(spec: str) -> list[ipaddress._BaseNetwork]:
@@ -65,6 +77,7 @@ class WebContext:
     db_path: Path = Path("/data/bigbrother.db")
     _feedback: object = None
     exports: dict = field(default_factory=dict)   # test-set export jobs by id
+    mfa_tickets: dict = field(default_factory=dict)  # password OK, waiting for the second factor
 
     @property
     def feedback(self):
@@ -153,6 +166,8 @@ async def require_login(request: web.Request, handler):
         origin, host = request.headers.get("Origin", ""), request.headers.get("Host", "")
         if not origin or origin.split("://", 1)[-1] != host:
             return web.json_response({"error": "cross-origin websocket refused"}, status=403)
+    if admin_only(request.method, path) and not sess.user.is_admin:
+        return web.json_response({"error": "Only an admin can do that."}, status=403)
     request[SESSION] = sess
     return await handler(request)
 
@@ -170,7 +185,8 @@ async def session_info(request: web.Request) -> web.Response:
     sess = await asyncio.to_thread(ctx.users.session, request.cookies.get(COOKIE))
     needs_setup = await asyncio.to_thread(ctx.users.count) == 0
     return web.json_response({
-        "user": sess.user.username if sess else None, "setup": needs_setup, "version": VERSION,
+        "user": sess.user.username if sess else None, "role": sess.user.role if sess else None,
+        "twofa": sess.user.twofa if sess else False, "setup": needs_setup, "version": VERSION,
     })
 
 
@@ -202,12 +218,47 @@ async def login(request: web.Request) -> web.Response:
         await asyncio.sleep(0.5)
         return web.json_response({"error": "Wrong username or password."}, status=401)
     persistent = bool(body.get("remember", True))
+    if user.twofa:
+        now = time.time()
+        for k in [k for k, t in ctx.mfa_tickets.items() if t["expires"] < now]:
+            del ctx.mfa_tickets[k]
+        ticket = secrets.token_urlsafe(24)
+        ctx.mfa_tickets[ticket] = {"user": user, "persistent": persistent, "expires": now + 300, "tries": 0}
+        return web.json_response({"need_code": True, "ticket": ticket})
+    return await _finish_login(ctx, request, user, persistent, ip)
+
+
+async def _finish_login(ctx: WebContext, request: web.Request, user, persistent: bool, ip: str) -> web.Response:
     token = await asyncio.to_thread(ctx.users.create_session, user, persistent, ip,
                                     request.headers.get("User-Agent", ""))
     log.info("login: %s from %s", user.username, ip)
     resp = web.json_response({"user": user.username})
     _set_cookie(ctx, request, resp, token, persistent)
     return resp
+
+
+async def login_code(request: web.Request) -> web.Response:
+    """Second step of a two-factor sign-in: the authenticator (or a recovery) code."""
+    ctx = request.app[CTX]
+    if request.headers.get(CSRF_HEADER) != "1":
+        return web.json_response({"error": "missing request header"}, status=403)
+    body = await _json(request)
+    t = ctx.mfa_tickets.get(str(body.get("ticket", "")))
+    if t is None or t["expires"] < time.time():
+        return web.json_response({"error": "That took too long. Sign in again."}, status=401)
+    ip, user = ctx.client_ip(request), t["user"]
+    if ctx.limiter.retry_after(ip, user.username) > 0:
+        return web.json_response({"error": "Too many failed attempts. Try again later."}, status=429)
+    if not await asyncio.to_thread(ctx.users.check_second_factor, user, str(body.get("code", ""))[:32]):
+        t["tries"] += 1
+        ctx.limiter.failed(ip, user.username)
+        if t["tries"] >= 5:
+            ctx.mfa_tickets.pop(str(body.get("ticket", "")), None)
+        log.warning("wrong two-factor code for %s from %s", user.username, ip)
+        await asyncio.sleep(0.5)
+        return web.json_response({"error": "That code is wrong or already used."}, status=401)
+    ctx.mfa_tickets.pop(str(body.get("ticket", "")), None)
+    return await _finish_login(ctx, request, user, t["persistent"], ip)
 
 
 async def setup(request: web.Request) -> web.Response:
@@ -226,7 +277,8 @@ async def setup(request: web.Request) -> web.Response:
         return web.json_response({"error": "That setup code is wrong. It's in the web service's log."},
                                  status=403)
     try:
-        user = await asyncio.to_thread(ctx.users.add, str(body.get("username", "")), str(body.get("password", "")))
+        user = await asyncio.to_thread(ctx.users.add, str(body.get("username", "")), str(body.get("password", "")),
+                                       "admin")
     except AuthError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     ctx.setup_code = ""
@@ -286,7 +338,7 @@ async def service_worker(request: web.Request) -> web.FileResponse:
 # -- app factory --------------------------------------------------------------------------
 
 def create_app(ctx: WebContext) -> web.Application:
-    from . import api, feedback_api, live, settings_api
+    from . import accounts_api, notify_api, api, feedback_api, live, settings_api
 
     app = web.Application(middlewares=[security_headers, require_login], client_max_size=2 * 1024 * 1024)
     app[CTX] = ctx
@@ -297,6 +349,7 @@ def create_app(ctx: WebContext) -> web.Application:
     app.router.add_static("/static/", STATIC, append_version=False)
     app.router.add_get("/api/session", session_info)
     app.router.add_post("/api/login", login)
+    app.router.add_post("/api/login/code", login_code)
     app.router.add_post("/api/setup", setup)
     app.router.add_post("/api/logout", logout)
     app.router.add_post("/api/password", change_password)
@@ -304,6 +357,8 @@ def create_app(ctx: WebContext) -> web.Application:
     live.register(app)
     settings_api.register(app)
     feedback_api.register(app)
+    accounts_api.register(app)
+    notify_api.register(app)
 
     async def on_startup(app: web.Application) -> None:
         ctx.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=5))

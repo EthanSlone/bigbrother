@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import struct
 import hmac
 import re
 import secrets
@@ -43,6 +45,17 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 """
+
+# Columns added after the first release (old databases are migrated on open).
+USER_COLUMNS = {
+    "role": "TEXT NOT NULL DEFAULT 'admin'",       # admin | member
+    "totp_secret": "TEXT",                         # base32; set once two-factor is on
+    "totp_pending": "TEXT",                        # during setup, before the first code
+    "totp_last": "INTEGER NOT NULL DEFAULT 0",     # last 30 s step used (no replays)
+    "recovery": "TEXT NOT NULL DEFAULT '[]'",      # SHA-256 of unused recovery codes
+    "prefs": "TEXT NOT NULL DEFAULT '{}'",         # notification settings etc. (JSON)
+}
+ROLES = ("admin", "member")
 
 USERNAME = re.compile(r"^[A-Za-z0-9_.@-]{2,64}$")
 MIN_PASSWORD = 10
@@ -101,6 +114,12 @@ def _token_hash(token: str) -> str:
 class User:
     id: int
     username: str
+    role: str = "admin"
+    twofa: bool = False
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == "admin"
 
 
 @dataclass(frozen=True)
@@ -119,6 +138,16 @@ class UserStore:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.executescript(SCHEMA)
+        cols = {r[1] for r in self._db.execute("PRAGMA table_info(users)")}
+        for name, decl in USER_COLUMNS.items():
+            if name not in cols:
+                self._db.execute(f"ALTER TABLE users ADD COLUMN {name} {decl}")
+
+    _USER_SQL = "SELECT id, username, role, totp_secret IS NOT NULL FROM users"
+
+    @staticmethod
+    def _user(row) -> User:
+        return User(row[0], row[1], row[2], bool(row[3]))
 
     # -- users -------------------------------------------------------------------
     def count(self) -> int:
@@ -127,27 +156,145 @@ class UserStore:
 
     def list(self) -> list[User]:
         with self._lock:
-            rows = self._db.execute("SELECT id, username FROM users ORDER BY username").fetchall()
-        return [User(*r) for r in rows]
+            rows = self._db.execute(self._USER_SQL + " ORDER BY username").fetchall()
+        return [self._user(r) for r in rows]
 
-    def add(self, username: str, password: str) -> User:
+    def get(self, username: str) -> User | None:
+        with self._lock:
+            row = self._db.execute(self._USER_SQL + " WHERE username = ?", (username,)).fetchone()
+        return self._user(row) if row else None
+
+    def overview(self) -> list[dict]:
+        """Users with last activity, for the admin's Users page."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT u.username, u.role, u.totp_secret IS NOT NULL, u.created_ts, MAX(s.last_seen_ts), "
+                "COUNT(s.token_hash) FROM users u LEFT JOIN sessions s ON s.user_id = u.id AND s.expires_ts > ? "
+                "GROUP BY u.id ORDER BY u.username", (time.time(),)).fetchall()
+        return [{"username": r[0], "role": r[1], "twofa": bool(r[2]), "created": r[3], "last_seen": r[4],
+                 "devices": r[5]} for r in rows]
+
+    def add(self, username: str, password: str, role: str = "admin") -> User:
         username = username.strip()
         if not USERNAME.match(username):
             raise AuthError("Username: 2-64 letters, digits, or . _ @ -")
+        if role not in ROLES:
+            raise AuthError("Role must be admin or member.")
         check_new_password(password, username)
         h, now = hash_password(password), time.time()
         with self._lock:
             try:
                 cur = self._db.execute(
-                    "INSERT INTO users (username, pw_hash, created_ts, pw_changed_ts) VALUES (?,?,?,?)",
-                    (username, h, now, now))
+                    "INSERT INTO users (username, pw_hash, created_ts, pw_changed_ts, role) VALUES (?,?,?,?,?)",
+                    (username, h, now, now, role))
             except sqlite3.IntegrityError as exc:
                 raise AuthError("That username is taken.") from exc
-        return User(cur.lastrowid, username)
+        return User(cur.lastrowid, username, role)
+
+    def _admins(self) -> int:
+        return self._db.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'").fetchone()[0]
 
     def delete(self, username: str) -> bool:
         with self._lock:
+            row = self._db.execute("SELECT role FROM users WHERE username = ?", (username,)).fetchone()
+            if row and row[0] == "admin" and self._admins() <= 1:
+                raise AuthError("This is the only admin. Make someone else an admin first.")
             return self._db.execute("DELETE FROM users WHERE username = ?", (username,)).rowcount > 0
+
+    def set_role(self, username: str, role: str) -> None:
+        if role not in ROLES:
+            raise AuthError("Role must be admin or member.")
+        with self._lock:
+            row = self._db.execute("SELECT role FROM users WHERE username = ?", (username,)).fetchone()
+            if not row:
+                raise AuthError("No such user.")
+            if row[0] == "admin" and role != "admin" and self._admins() <= 1:
+                raise AuthError("This is the only admin. Make someone else an admin first.")
+            self._db.execute("UPDATE users SET role = ? WHERE username = ?", (role, username))
+
+    # -- preferences ----------------------------------------------------------------
+    def prefs(self, username: str) -> dict:
+        with self._lock:
+            row = self._db.execute("SELECT prefs FROM users WHERE username = ?", (username,)).fetchone()
+        try:
+            return json.loads(row[0]) if row else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def update_prefs(self, username: str, changes: dict) -> dict:
+        with self._lock:
+            row = self._db.execute("SELECT prefs FROM users WHERE username = ?", (username,)).fetchone()
+            if not row:
+                raise AuthError("No such user.")
+            prefs = json.loads(row[0] or "{}")
+            for k, v in changes.items():
+                if v is None:
+                    prefs.pop(k, None)
+                else:
+                    prefs[k] = v
+            self._db.execute("UPDATE users SET prefs = ? WHERE username = ?", (json.dumps(prefs), username))
+        return prefs
+
+    def all_prefs(self) -> dict[str, dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT username, prefs FROM users").fetchall()
+        out = {}
+        for name, raw in rows:
+            try:
+                out[name] = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                out[name] = {}
+        return out
+
+    # -- two-factor sign-in (TOTP, RFC 6238) ---------------------------------------
+    def totp_begin(self, username: str) -> str:
+        secret = base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+        with self._lock:
+            self._db.execute("UPDATE users SET totp_pending = ? WHERE username = ?", (secret, username))
+        return secret
+
+    def totp_confirm(self, username: str, code: str) -> list[str]:
+        """Turn two-factor on if `code` matches the pending secret. Returns recovery codes
+        (shown once)."""
+        with self._lock:
+            row = self._db.execute("SELECT totp_pending FROM users WHERE username = ?", (username,)).fetchone()
+        if not row or not row[0]:
+            raise AuthError("Start two-factor setup first.")
+        step = totp_match(row[0], code)
+        if step is None:
+            raise AuthError("That code didn't match. Check the time on your phone and try the newest code.")
+        codes = [f"{secrets.token_hex(2)}-{secrets.token_hex(2)}" for _ in range(8)]
+        with self._lock:
+            self._db.execute(
+                "UPDATE users SET totp_secret = totp_pending, totp_pending = NULL, totp_last = ?, recovery = ? "
+                "WHERE username = ?", (step, json.dumps([_token_hash(c) for c in codes]), username))
+        return codes
+
+    def totp_disable(self, username: str) -> None:
+        with self._lock:
+            self._db.execute("UPDATE users SET totp_secret = NULL, totp_pending = NULL, recovery = '[]' "
+                             "WHERE username = ?", (username,))
+
+    def check_second_factor(self, user: User, code: str) -> bool:
+        """A current authenticator code (each usable once) or an unused recovery code."""
+        code = code.strip().replace(" ", "")
+        with self._lock:
+            row = self._db.execute("SELECT totp_secret, totp_last, recovery FROM users WHERE id = ?",
+                                   (user.id,)).fetchone()
+            if not row or not row[0]:
+                return False
+            secret, last, recovery = row
+            step = totp_match(secret, code)
+            if step is not None and step > last:
+                self._db.execute("UPDATE users SET totp_last = ? WHERE id = ?", (step, user.id))
+                return True
+            hashes = json.loads(recovery or "[]")
+            h = _token_hash(code.lower())
+            if h in hashes:
+                hashes.remove(h)
+                self._db.execute("UPDATE users SET recovery = ? WHERE id = ?", (json.dumps(hashes), user.id))
+                return True
+        return False
 
     def set_password(self, username: str, password: str) -> None:
         check_new_password(password, username)
@@ -163,12 +310,12 @@ class UserStore:
 
     def authenticate(self, username: str, password: str) -> User | None:
         with self._lock:
-            row = self._db.execute("SELECT id, username, pw_hash FROM users WHERE username = ?",
-                                   (username.strip(),)).fetchone()
+            row = self._db.execute("SELECT id, username, role, totp_secret IS NOT NULL, pw_hash FROM users "
+                                   "WHERE username = ?", (username.strip(),)).fetchone()
         if row is None:
             verify_password(password, _DUMMY_HASH)
             return None
-        return User(row[0], row[1]) if verify_password(password, row[2]) else None
+        return self._user(row) if verify_password(password, row[4]) else None
 
     # -- sessions ----------------------------------------------------------------
     def create_session(self, user: User, persistent: bool, ip: str = "", user_agent: str = "") -> str:
@@ -189,11 +336,12 @@ class UserStore:
         th, now = _token_hash(token), time.time()
         with self._lock:
             row = self._db.execute(
-                "SELECT u.id, u.username, s.expires_ts, s.persistent, s.last_seen_ts FROM sessions s "
+                "SELECT u.id, u.username, s.expires_ts, s.persistent, s.last_seen_ts, u.role, "
+                "u.totp_secret IS NOT NULL FROM sessions s "
                 "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?", (th,)).fetchone()
             if row is None:
                 return None
-            uid, name, expires, persistent, last_seen = row
+            uid, name, expires, persistent, last_seen, role, twofa = row
             if expires < now:
                 self._db.execute("DELETE FROM sessions WHERE token_hash = ?", (th,))
                 return None
@@ -202,7 +350,7 @@ class UserStore:
                 expires = now + ttl
                 self._db.execute("UPDATE sessions SET last_seen_ts = ?, expires_ts = ? WHERE token_hash = ?",
                                  (now, expires, th))
-        return Session(User(uid, name), th, expires, bool(persistent))
+        return Session(User(uid, name, role, bool(twofa)), th, expires, bool(persistent))
 
     def end_session(self, token: str | None) -> None:
         if token:
@@ -219,7 +367,8 @@ class UserStore:
             rows = self._db.execute(
                 "SELECT token_hash, created_ts, last_seen_ts, ip, user_agent FROM sessions "
                 "WHERE user_id = ? AND expires_ts > ? ORDER BY last_seen_ts DESC", (user.id, time.time())).fetchall()
-        return [{"id": r[0][:12], "created": r[1], "last_seen": r[2], "ip": r[3], "user_agent": r[4]} for r in rows]
+        return [{"id": r[0][:12], "created": r[1], "last_seen": r[2], "ip": r[3], "user_agent": r[4],
+                 "hash": r[0]} for r in rows]
 
     def close(self) -> None:
         with self._lock:
@@ -270,3 +419,30 @@ def new_setup_code() -> str:
 def setup_code_matches(given: str, code: str) -> bool:
     norm = lambda s: re.sub(r"[^A-Z0-9]", "", s.upper())  # noqa: E731
     return bool(code) and hmac.compare_digest(norm(given), norm(code))
+
+
+# -- TOTP -------------------------------------------------------------------------------
+
+def _hotp(secret_b32: str, counter: int) -> str:
+    key = base64.b32decode(secret_b32 + "=" * (-len(secret_b32) % 8), casefold=True)
+    mac = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    off = mac[-1] & 0x0F
+    return f"{(struct.unpack('>I', mac[off:off + 4])[0] & 0x7FFFFFFF) % 1_000_000:06d}"
+
+
+def totp_match(secret_b32: str, code: str, now: float | None = None, drift: int = 1) -> int | None:
+    """The 30 s step `code` belongs to (allowing one step of clock drift), or None."""
+    code = code.strip().replace(" ", "")
+    if not (code.isdigit() and len(code) == 6):
+        return None
+    step = int((now if now is not None else time.time()) // 30)
+    for s in range(step - drift, step + drift + 1):
+        if hmac.compare_digest(_hotp(secret_b32, s), code):
+            return s
+    return None
+
+
+def totp_uri(secret_b32: str, username: str, issuer: str = "BigBrother") -> str:
+    from urllib.parse import quote
+    return (f"otpauth://totp/{quote(issuer)}:{quote(username)}?secret={secret_b32}&issuer={quote(issuer)}"
+            f"&algorithm=SHA1&digits=6&period=30")

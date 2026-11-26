@@ -57,6 +57,7 @@ class Alerter:
     fetch: object = fetch_frame                  # (go2rtc_api, stream) -> image | None
     clock: object = time.time
     _state: dict[str, _EventState] = field(default_factory=dict)
+    _recent: dict[tuple[str, str], tuple[float, str]] = field(default_factory=dict)  # (key, label) -> (ts, camera)
 
     def __post_init__(self):
         self.tz = ZoneInfo(self.cfg.alerts.timezone)
@@ -144,6 +145,32 @@ class Alerter:
     def _send(self, st: _EventState, cam, frame: np.ndarray, box) -> None:
         ev = st.event
         image = render_alert_image(frame, box, ev["label"])
+        rel = Path("alerts") / f"{ev['id']}.jpg"
+        (self.data_dir / rel).write_bytes(image)
+        st.alerted = True
+
+        # One alert per visit: someone walking from the driveway to the front door is one
+        # notification, not one per camera. Tracked per person, so whoever only follows the
+        # front door still hears about it.
+        now = self.clock()
+        routed = hasattr(self.notifier, "targets")
+        keys = (self.notifier.targets(cam.id) if routed else []) or ["*"]   # "*": nobody set up yet
+        window = self.cfg.alerts.group_seconds
+        fresh, earlier = [], None
+        for k in keys:
+            hit = self._recent.get((k, ev["label"]))
+            if window and hit and now - hit[0] < window:
+                earlier = earlier or hit
+            else:
+                fresh.append(k)
+        if keys and not fresh:
+            other = self.cfg.cameras.get(earlier[1])
+            reason = (f"same visit: {ev['label']} alert from {other.name if other else earlier[1]} "
+                      f"{int(now - earlier[0])}s ago")
+            self._record(ev, "grouped", reason, st.verify_score, image=str(rel))
+            log.info("[%s] %s %s: %s", ev["camera"], ev["label"], ev["id"], reason)
+            return
+
         when = dt.datetime.fromtimestamp(ev["start_ts"], self.tz)
         zones = ev.get("zones") or []
         where = f" in {', '.join(z.replace('_', ' ') for z in zones)}" if zones else ""
@@ -156,10 +183,11 @@ class Alerter:
             url_title="View clip",
             timestamp=int(ev["start_ts"]),
         )
-        result = self.notifier.send(msg)
-        st.alerted = True
-        rel = Path("alerts") / f"{ev['id']}.jpg"
-        (self.data_dir / rel).write_bytes(image)
+        result = (self.notifier.send(msg, keys=[k for k in fresh if k != "*"]) if routed
+                  else self.notifier.send(msg))
+        if result.ok:
+            for k in fresh:
+                self._recent[(k, ev["label"])] = (now, cam.id)
         self._record(ev, result.status, result.detail, st.verify_score, sent_ts=self.clock(), image=str(rel))
         log.info("[%s] ALERT %s: %s (%s)", ev["camera"], result.status, msg.title, result.detail)
         if self.publish:
@@ -175,7 +203,7 @@ class Alerter:
     def _record(self, ev: dict, status: str, reason: str, score: float | None = None,
                 sent_ts: float | None = None, image: str | None = None) -> None:
         prev = self.store.get(ev["id"])
-        if prev and prev.status in ("sent", "logged", "failed") and status in ("pending", "suppressed"):
+        if prev and prev.status in ("sent", "logged", "failed", "grouped") and status in ("pending", "suppressed"):
             return  # never downgrade a delivered alert
         self.store.save(AlertRecord(ev["id"], ev["camera"], ev["label"], status, reason, score, sent_ts, image))
 
@@ -210,7 +238,7 @@ def run(cfg: Config, data_dir: Path, db_path: Path, recordings_root: Path = Path
         signal.signal(sig, lambda *_: stop.set())
 
     store = AlertStore(db_path)
-    notifier = make_notifier(cfg.alerts.notifier, cfg.alerts.priority, cfg.alerts.sound)
+    notifier = make_notifier(cfg.alerts.notifier, cfg.alerts.priority, cfg.alerts.sound, data_dir / "web.db")
     log.info("notifier: %s; second opinion: %s", notifier.name,
              cfg.alerts.verify_model if cfg.alerts.verify else "off")
     verifier = build_verifier(cfg)
@@ -265,9 +293,9 @@ def run(cfg: Config, data_dir: Path, db_path: Path, recordings_root: Path = Path
         store.close()
 
 
-def send_test(cfg: Config) -> int:
-    """Send one test notification (uses a live frame from the first camera if available)."""
-    notifier = make_notifier(cfg.alerts.notifier, cfg.alerts.priority, cfg.alerts.sound)
+def send_test(cfg: Config, data_dir: Path = Path("/data")) -> int:
+    """Send one test notification to everyone set up for alerts (uses a live frame if available)."""
+    notifier = make_notifier(cfg.alerts.notifier, cfg.alerts.priority, cfg.alerts.sound, data_dir / "web.db")
     cam = next(iter(cfg.cameras.values()))
     frame = fetch_frame(cfg.go2rtc_api, cam.main_stream)
     if frame is None:

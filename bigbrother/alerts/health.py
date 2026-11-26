@@ -186,7 +186,8 @@ class HealthWatcher:
 
     def _send(self, msg) -> None:
         try:
-            res = self.notifier.send(msg)
+            res = (self.notifier.send(msg, health=True) if hasattr(self.notifier, "targets")
+                   else self.notifier.send(msg))
             log.warning("health alert %s: %s | %s", res.status, msg.title, msg.body.replace("\n", " / "))
         except Exception:  # noqa: BLE001
             log.exception("couldn't send health alert")

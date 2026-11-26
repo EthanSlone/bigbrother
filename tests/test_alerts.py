@@ -311,3 +311,98 @@ def test_find_problems():
     assert set(find_problems(cfg, **{**base, "available": {"recorder": "offline"}})) == {"svc:recorder"}
     assert "svc:go2rtc" in find_problems(cfg, **{**base, "go2rtc_ok": False})
     assert "svc:detector" in find_problems(cfg, **{**base, "detector": None})
+
+
+# -- people and visits ---------------------------------------------------------------
+
+def _two_cams(alerts=None):
+    data = {"cameras": {"front": {"streams": {"main": "rtsp://h/1"}},
+                        "drive": {"name": "Driveway", "streams": {"main": "rtsp://h/2"}}}}
+    if alerts is not None:
+        data["alerts"] = alerts
+    return parse_config(data)
+
+
+class RoutedRecorder:
+    """Stands in for RoutedNotifier: fixed recipients per camera."""
+    name = "pushover"
+
+    def __init__(self, by_cam):
+        self.by_cam, self.sent = by_cam, []
+
+    def targets(self, camera=None, health=False):
+        return list(self.by_cam.get(camera, []))
+
+    def send(self, msg, camera=None, health=False, keys=None):
+        self.sent.append((msg.title, sorted(keys)))
+        return SendResult(True, "sent", "ok")
+
+
+def test_one_alert_per_visit_across_cameras(tmp_path):
+    now = [1000.0]
+    a, store, n = make_alerter(tmp_path, _two_cams(), [Detection("person", 0.9, (0, 0, 40, 100))],
+                               clock=lambda: now[0])
+    a.handle({"type": "start", "event": event(id="e1", camera="drive")})
+    now[0] = 1040
+    a.handle({"type": "start", "event": event(id="e2", camera="front")})
+    assert len(n.sent) == 1
+    rec = store.get("e2")
+    assert rec.status == "grouped" and "Driveway" in rec.reason and (tmp_path / rec.image).exists()
+    now[0] = 1200   # a later visit alerts again
+    a.handle({"type": "start", "event": event(id="e3", camera="drive")})
+    assert len(n.sent) == 2
+
+
+def test_visit_grouping_is_per_person_and_can_be_off(tmp_path):
+    now = [1000.0]
+    a, store, _ = make_alerter(tmp_path, _two_cams(), [Detection("person", 0.9, (0, 0, 40, 100))],
+                               clock=lambda: now[0])
+    a.notifier = RoutedRecorder({"drive": ["ANNA"], "front": ["ANNA", "BEN"]})
+    a.handle({"type": "start", "event": event(id="e1", camera="drive")})
+    now[0] = 1030
+    a.handle({"type": "start", "event": event(id="e2", camera="front")})
+    # Ben only follows the front door, so he still hears about it; Anna already did.
+    assert a.notifier.sent == [("Person · Driveway", ["ANNA"]), ("Person · Front", ["BEN"])]
+
+    a2, _, n2 = make_alerter(tmp_path / "b", _two_cams({"group_seconds": 0}),
+                             [Detection("person", 0.9, (0, 0, 40, 100))], clock=lambda: now[0])
+    a2.handle({"type": "start", "event": event(id="e1", camera="drive")})
+    a2.handle({"type": "start", "event": event(id="e2", camera="front")})
+    assert len(n2.sent) == 2
+
+
+def test_recipients_come_from_accounts_with_env_fallback(tmp_path):
+    from bigbrother.alerts.notify import RoutedNotifier
+    from bigbrother.alerts.recipients import Directory, set_setting
+    from bigbrother.web.auth import UserStore
+
+    db = tmp_path / "web.db"
+    users = UserStore(db)
+    users.add("anna", "correct horse battery")
+    users.add("ben", "correct horse battery", "member")
+    users.update_prefs("anna", {"pushover_user": "A" * 30})
+    users.update_prefs("ben", {"pushover_user": "B" * 30, "alert_cameras": ["front"], "alert_health": False})
+
+    sent = []
+
+    class Fake:
+        def __init__(self, user, token, *a, **kw):
+            self.user, self.token = user, token
+
+        def send(self, msg):
+            sent.append((self.user, self.token))
+            return SendResult(True, "sent", "")
+
+    env = {"PUSHOVER_USER": "E" * 30}
+    n = RoutedNotifier(Directory(db, env), factory=Fake)
+    assert n.name == "log"                                   # no token anywhere yet
+    assert n.send(Message("t", "b"), camera="front").status == "logged"
+    env["PUSHOVER_TOKEN"] = "T" * 30
+    n.directory.forget()
+    assert n.targets("front") == ["A" * 30, "B" * 30, "E" * 30]
+    assert n.targets("drive") == ["A" * 30, "E" * 30]
+    assert n.targets(health=True) == ["A" * 30, "E" * 30]
+    set_setting(db, "pushover_token", "S" * 30)              # the app's token wins over .env
+    n.directory.forget()
+    n.send(Message("t", "b"), camera="drive")
+    assert sent[-1] == ("A" * 30 + "," + "E" * 30, "S" * 30)

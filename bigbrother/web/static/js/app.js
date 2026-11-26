@@ -15,7 +15,7 @@ export async function api(path, {method = 'GET', body, signal} = {}) {
   const r = await fetch(path, opts);
   let data = null;
   if ((r.headers.get('Content-Type') || '').includes('json')) data = await r.json();
-  if (r.status === 401 && path !== '/api/login') { showGate(); throw new ApiError(401, 'Signed out'); }
+  if (r.status === 401 && !path.startsWith('/api/login')) { showGate(); throw new ApiError(401, 'Signed out'); }
   if (!r.ok) throw new ApiError(r.status, (data && data.error) || `Request failed (${r.status})`);
   return data;
 }
@@ -41,7 +41,7 @@ export function duration(a, b) {
   return `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`;
 }
 export const ALERT_TEXT = {sent: 'Alert sent', logged: 'Alert logged', failed: 'Alert failed',
-  suppressed: 'No alert', pending: 'Checking'};
+  suppressed: 'No alert', pending: 'Checking', grouped: 'Same visit'};
 
 export function toast(msg, ms = 2600) {
   const t = document.createElement('div');
@@ -63,10 +63,27 @@ export const ICON = {
   download: I('<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>'),
   expand: I('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'),
 };
-export const MARK = `<svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="19" fill="none" stroke="#E6EDF2" stroke-width="5"/><circle cx="32" cy="32" r="8" fill="#F0A93A"/></svg>`;
+// The mark: a roofline over a lens whose pupil is the porch lamp.
+export const MARK = `<svg viewBox="0 0 64 64" aria-hidden="true"><path d="M9 29 32 9l23 20" fill="none" stroke="#E6EDF2" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="32" cy="40" r="13.5" fill="none" stroke="#E6EDF2" stroke-width="5.5"/><circle cx="32" cy="40" r="6" fill="#F0A93A"/></svg>`;
+// Night street: the porch lamp is the only light. Framed so the roof stays in view at any size.
+const SCENE = `<svg viewBox="-90 270 900 490" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+  <defs><radialGradient id="glow" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#F0A93A" stop-opacity=".5"/><stop offset=".35" stop-color="#F0A93A" stop-opacity=".14"/><stop offset="1" stop-color="#F0A93A" stop-opacity="0"/></radialGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#121B24"/><stop offset="1" stop-color="#1B2833"/></linearGradient></defs>
+  <rect x="-600" y="0" width="1800" height="1200" fill="url(#sky)"/>
+  <path d="M-600 640 L90 640 L90 560 L160 505 L230 560 L230 640 L560 640 L560 585 L620 540 L680 585 L680 640 L1200 640 L1200 1200 L-600 1200Z" fill="#1E2C38"/>
+  <path d="M250 690 L250 545 L375 440 L500 545 L500 690Z" fill="#223240"/>
+  <path d="M232 560 L375 438 L518 560" fill="none" stroke="#2E4354" stroke-width="10" stroke-linejoin="round" stroke-linecap="round"/>
+  <rect x="300" y="590" width="44" height="100" fill="#1A2631"/>
+  <rect x="400" y="575" width="56" height="44" rx="3" fill="#1A2631"/>
+  <circle cx="362" cy="600" r="150" fill="url(#glow)"/>
+  <rect x="355" y="592" width="14" height="18" rx="4" fill="#F0A93A"/>
+  <path d="M-600 690 L1200 690 L1200 1200 L-600 1200Z" fill="#14202A"/>
+  <path d="M300 690 L344 690 L372 1200 L272 1200Z" fill="#F0A93A" fill-opacity=".05"/>
+</svg>`;
 
 // ---------- state ----------
-export const state = {user: null, cameras: [], camById: {}, armed: null};
+export const state = {user: null, role: null, twofa: false, cameras: [], camById: {}, armed: null};
+export const isAdmin = () => state.role === 'admin';
 
 export async function loadCameras() {
   state.cameras = await api('/api/cameras');
@@ -80,34 +97,66 @@ async function showGate() {
   stopView();
   const s = await (await fetch('/api/session')).json();
   const root = $('#root');
-  const setup = s.setup;
-  root.innerHTML = `<div class="gate"><form novalidate>
-    <div class="mark">${MARK}<h1>BigBrother</h1></div>
-    ${setup ? `<p>Create the first account. You'll find the setup code in the web service's log:
-      <code>docker compose logs web</code></p>
-      <label class="field">Setup code<input type="text" name="code" autocomplete="off" autocapitalize="characters" required></label>` : ''}
-    <label class="field">Username<input type="text" name="username" autocomplete="username" autocapitalize="none" required></label>
-    <label class="field">Password<input type="password" name="password" autocomplete="${setup ? 'new-password' : 'current-password'}" required></label>
-    ${setup ? '<label class="field">Repeat password<input type="password" name="password2" autocomplete="new-password" required></label><p>At least 10 characters.</p>'
-            : '<label class="check"><input type="checkbox" name="remember" checked> Keep me signed in on this device</label>'}
-    <p class="error" role="alert" hidden></p>
-    <button class="btn primary" type="submit">${setup ? 'Create account' : 'Sign in'}</button>
-  </form></div>`;
-  const form = $('form', root), err = $('.error', root);
-  $('input', form).focus();
+  root.innerHTML = `<div class="gate"><div class="scene">${SCENE}</div><main class="gate-main">
+      <div class="wordmark">${MARK}<span>BigBrother</span></div><div id="gate-step"></div></main></div>`;
+  if (s.setup) stepSetup(); else stepSignIn();
+}
+
+function gateForm(html, onsubmit) {
+  const el = $('#gate-step');
+  el.innerHTML = `<form novalidate class="gate-form">${html}<p class="error" role="alert" hidden></p></form>`;
+  const form = $('form', el), err = $('.error', form);
+  const first = $('input:not([type=checkbox])', form); if (first) first.focus();
   form.onsubmit = async e => {
     e.preventDefault();
-    const f = Object.fromEntries(new FormData(form));
     err.hidden = true;
-    if (setup && f.password !== f.password2) { err.textContent = "The passwords don't match."; err.hidden = false; return; }
-    const btn = $('button', form); btn.disabled = true;
-    try {
-      await api(setup ? '/api/setup' : '/api/login', {method: 'POST',
-        body: setup ? {code: f.code, username: f.username, password: f.password}
-                    : {username: f.username, password: f.password, remember: !!f.remember}});
-      start();
-    } catch (ex) { err.textContent = ex.message; err.hidden = false; btn.disabled = false; }
+    const btn = $('button[type=submit]', form); btn.disabled = true;
+    try { await onsubmit(Object.fromEntries(new FormData(form)), form); }
+    catch (ex) { err.textContent = ex.message; err.hidden = false; }
+    finally { btn.disabled = false; }
   };
+  return form;
+}
+
+function stepSignIn() {
+  gateForm(`<h1>Sign in</h1>
+    <label class="field">Username<input type="text" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+    <label class="field">Password<input type="password" name="password" autocomplete="current-password" required></label>
+    <label class="check"><input type="checkbox" name="remember" checked> Keep me signed in on this device</label>
+    <button class="btn primary big" type="submit">Sign in</button>`, async f => {
+    const r = await api('/api/login', {method: 'POST', body: {username: f.username, password: f.password, remember: !!f.remember}});
+    if (r && r.need_code) return stepCode(r.ticket);
+    start();
+  });
+}
+
+function stepCode(ticket, recovery = false) {
+  const form = gateForm(`<h1>${recovery ? 'Use a recovery code' : 'Enter your code'}</h1>
+    <p>${recovery ? 'One of the codes you saved when you turned on two-factor sign-in. Each works once.'
+                  : 'Open your authenticator app and enter the 6-digit code for BigBrother.'}</p>
+    <label class="field">${recovery ? 'Recovery code' : 'Code'}<input type="text" name="code" class="code" required
+      ${recovery ? 'autocomplete="off" placeholder="abcd-1234"' : 'inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="123456"'}></label>
+    <button class="btn primary big" type="submit">Continue</button>
+    <button class="btn quiet" type="button" id="swap">${recovery ? 'Use my authenticator app' : "I don't have my phone"}</button>`,
+    async f => { await api('/api/login/code', {method: 'POST', body: {ticket, code: f.code}}); start(); });
+  $('#swap', form).onclick = () => stepCode(ticket, !recovery);
+  if (!recovery) $('input', form).addEventListener('input', e => { if (/^\d{6}$/.test(e.target.value)) form.requestSubmit(); });
+}
+
+function stepSetup() {
+  gateForm(`<h1>Set up BigBrother</h1>
+    <p>Create the admin account. The setup code is in the web service's log on the server:
+      <code>docker compose logs web | grep "setup code"</code></p>
+    <label class="field">Setup code<input type="text" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
+    <label class="field">Username<input type="text" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+    <label class="field">Password<input type="password" name="password" autocomplete="new-password" required></label>
+    <label class="field">Repeat password<input type="password" name="password2" autocomplete="new-password" required></label>
+    <p class="hint">At least 10 characters.</p>
+    <button class="btn primary big" type="submit">Create account</button>`, async f => {
+    if (f.password !== f.password2) throw new Error("The passwords don't match.");
+    await api('/api/setup', {method: 'POST', body: {code: f.code, username: f.username, password: f.password}});
+    start();
+  });
 }
 
 // ---------- shell ----------
@@ -193,7 +242,7 @@ let armedTimer = null;
 async function start() {
   const s = await (await fetch('/api/session')).json();
   if (!s.user) return showGate();
-  state.user = s.user;
+  state.user = s.user; state.role = s.role; state.twofa = s.twofa;
   await loadCameras();
   renderShell();
   const poll = () => api('/api/armed').then(r => { showArmed(r.armed); showProblems(r.problems); }).catch(() => {});

@@ -15,6 +15,7 @@ import os
 import secrets
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
@@ -125,11 +126,70 @@ def _http_error_detail(exc: urllib.error.HTTPError) -> str:
         return exc.reason or ""
 
 
-def make_notifier(kind: str, priority: int = 0, sound: str = ""):
+def validate_user(token: str, user: str, url: str = PUSHOVER_URL) -> tuple[bool, str]:
+    """Ask Pushover whether a user or group key is real (pushover.net/api#verification)."""
+    body = urllib.parse.urlencode({"token": token, "user": user}).encode()
+    req = urllib.request.Request(url.replace("messages.json", "users/validate.json"), data=body, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        if 400 <= exc.code < 500:
+            detail = _http_error_detail(exc)
+            if "token" in detail and "user" not in detail:
+                return False, "Pushover rejected the app token. An admin can fix it under Settings, Alerts."
+            return False, "Pushover doesn't recognise that user key. Copy it from the top of pushover.net after signing in."
+        return True, f"couldn't check (Pushover HTTP {exc.code}); saved anyway"
+    except Exception as exc:  # noqa: BLE001 - offline: don't block saving
+        return True, f"couldn't reach Pushover to check ({type(exc).__name__}); saved anyway"
+    if data.get("status") == 1:
+        devices = data.get("devices") or []
+        return True, f"devices: {', '.join(devices)}" if devices else "key is valid"
+    return False, "Pushover doesn't recognise that user key."
+
+
+class RoutedNotifier:
+    """Sends to the people who asked for this camera's alerts, in one Pushover request.
+
+    Pushover takes up to 50 comma-separated user keys per message, so a visit costs one
+    request whoever is listening. Without a token or anyone to send to, alerts are logged.
+    """
+
+    def __init__(self, directory, priority: int = 0, sound: str = "", url: str = PUSHOVER_URL,
+                 factory=PushoverNotifier):
+        self.directory, self.priority, self.sound, self.url = directory, priority, sound, url
+        self.factory = factory
+        self.remaining: int | None = None
+
+    @property
+    def name(self) -> str:
+        token, people = self.directory.load()
+        return "pushover" if token and people else "log"
+
+    def targets(self, camera: str | None = None, health: bool = False) -> list[str]:
+        _, people = self.directory.load()
+        return sorted({r.key for r in people if r.wants(camera, health)})
+
+    def send(self, msg: Message, camera: str | None = None, health: bool = False,
+             keys: list[str] | None = None) -> SendResult:
+        token, people = self.directory.load()
+        if keys is None:
+            keys = self.targets(camera, health)
+        if not token or not keys:
+            why = ("no Pushover app token: an admin can add one under Settings, Alerts" if not token else
+                   "nobody has phone alerts set up for this" if people else
+                   "nobody has added a Pushover key yet (Settings, Your account)")
+            log.info("ALERT (not sent, %s): %s | %s", why, msg.title, msg.body)
+            return SendResult(True, "logged", why)
+        sender = self.factory(",".join(keys[:50]), token, self.priority, self.sound, url=self.url)
+        res = sender.send(msg)
+        self.remaining = getattr(sender, "remaining", None) or self.remaining
+        return res
+
+
+def make_notifier(kind: str, priority: int = 0, sound: str = "", web_db=None):
     if kind == "pushover":
-        user, token = os.environ.get("PUSHOVER_USER", ""), os.environ.get("PUSHOVER_TOKEN", "")
-        if user and token:
-            # BB_PUSHOVER_URL exists only so tests can point at a local stand-in.
-            return PushoverNotifier(user, token, priority, sound, url=os.environ.get("BB_PUSHOVER_URL", PUSHOVER_URL))
-        log.warning("PUSHOVER_USER / PUSHOVER_TOKEN not set: alerts will be logged, not sent")
+        from .recipients import Directory
+        # BB_PUSHOVER_URL exists only so tests can point at a local stand-in.
+        return RoutedNotifier(Directory(web_db), priority, sound, url=os.environ.get("BB_PUSHOVER_URL", PUSHOVER_URL))
     return LogNotifier()

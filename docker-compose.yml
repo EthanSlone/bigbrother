@@ -69,6 +69,27 @@ services:
       - models:/models
     depends_on: [go2rtc, mosquitto, detector]
 
+  # The app: login, live view, events, recordings, settings. The one service meant to be
+  # reached from outside, through your reverse proxy. First start prints a setup code:
+  #   docker compose logs web
+  web:
+    build: .
+    image: bigbrother:dev
+    command: ["web"]
+    restart: unless-stopped
+    environment:
+      BB_LOG_LEVEL: ${BB_LOG_LEVEL:-INFO}
+      # IP(s) of your reverse proxy, so login rate limiting sees real client addresses
+      # and cookies are marked secure behind HTTPS. Comma-separated; CIDR allowed.
+      BB_TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+    volumes:
+      - ./config:/config        # read-write: settings edited in the app are saved here
+      - data:/data
+      - ${RECORDINGS_PATH:-recordings}:/recordings:ro
+    ports:
+      - "${WEB_PORT:-8090}:8090"
+    depends_on: [go2rtc, mosquitto]
+
   # One-off commands: `docker compose run --rm tools configure|probe|fakecam|evaluate|test-alert`
   tools:
     build: .

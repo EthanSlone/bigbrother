@@ -9,6 +9,8 @@
     python -m bigbrother test-alert  send one test notification
     python -m bigbrother models      download/verify built-in detection models
     python -m bigbrother evaluate    run clips through detection offline and count events
+    python -m bigbrother web         run the web app (login, live view, events, recordings)
+    python -m bigbrother user ...    manage app accounts: list | add NAME | passwd NAME | delete NAME
 """
 
 from __future__ import annotations
@@ -139,6 +141,51 @@ def _recorder(args) -> int:
     return 0
 
 
+def _web(args) -> int:
+    from .web.app import run
+
+    cfg = load_config(args.config)
+    run(cfg, Path(args.data), Path(args.db), Path(args.recordings), args.port)
+    return 0
+
+
+def _read_password(prompt: str) -> str:
+    import getpass
+
+    if not sys.stdin.isatty():  # e.g. piped: first line is the password
+        return sys.stdin.readline().rstrip("\n")
+    first = getpass.getpass(prompt)
+    if getpass.getpass("Repeat: ") != first:
+        raise SystemExit("Passwords don't match.")
+    return first
+
+
+def _user(args) -> int:
+    from .web.auth import AuthError, UserStore
+
+    users = UserStore(Path(args.data) / "web.db")
+    try:
+        if args.action == "list":
+            for u in users.list():
+                print(u.username)
+            return 0
+        if not args.name:
+            print("Give a username.")
+            return 1
+        if args.action == "add":
+            users.add(args.name, _read_password(f"Password for {args.name}: "))
+            print(f"Added {args.name}.")
+        elif args.action == "passwd":
+            users.set_password(args.name, _read_password(f"New password for {args.name}: "))
+            print(f"Password changed; {args.name} is signed out everywhere.")
+        elif args.action == "delete":
+            print(f"Deleted {args.name}." if users.delete(args.name) else f"No user {args.name}.")
+        return 0
+    except AuthError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=os.environ.get("BB_LOG_LEVEL", "INFO").upper(),
@@ -191,6 +238,19 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--recordings", default="/recordings")
     r.add_argument("--db", default="/data/bigbrother.db")
     r.set_defaults(func=_recorder)
+
+    w = sub.add_parser("web", help="run the web app")
+    w.add_argument("--data", default="/data")
+    w.add_argument("--db", default="/data/bigbrother.db")
+    w.add_argument("--recordings", default="/recordings")
+    w.add_argument("--port", type=int, default=8090)
+    w.set_defaults(func=_web)
+
+    us = sub.add_parser("user", help="manage app accounts")
+    us.add_argument("action", choices=["list", "add", "passwd", "delete"])
+    us.add_argument("name", nargs="?")
+    us.add_argument("--data", default="/data")
+    us.set_defaults(func=_user)
 
     args = p.parse_args(argv)
     try:

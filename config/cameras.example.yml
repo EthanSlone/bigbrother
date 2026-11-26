@@ -34,7 +34,7 @@ defaults:
   detect:
     enabled: true
     fps: 5                # frames analysed per second (from the substream)
-    live_fps: 15          # frames decoded per second for the live preview
+    # live_fps: 15        # debug viewer preview rate (costs CPU); app live view uses go2rtc
     labels: [person, car, truck, bus, motorcycle, bicycle, dog, cat]
     min_score: 0.2        # weakest detection kept (below 0.5 it can only extend an existing track)
     threshold: 0.6        # median score an object needs to become an event

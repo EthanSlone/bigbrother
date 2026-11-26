@@ -4,10 +4,10 @@ A self-hosted NVR built to replace Frigate: proven plumbing (go2rtc, ffmpeg) wit
 detection, verification and alerting on top. The design and decisions live in the
 "NVR Tool" project (`design/architecture.md`).
 
-**Status: Phase 3.** Camera probe, go2rtc stream hub, 24/7 recording with retention, object
+**Status: Phase 4.** Camera probe, go2rtc stream hub, 24/7 recording with retention, object
 detection with tracking, zones and masks, alerts to your phone via Pushover with a
-second-opinion check, recording playback (event clips and a timeline), a debug viewer, and
-an MQTT event bus. The app (Phase 4) comes next.
+second-opinion check, and **the app**: login, live video, an event feed with clips,
+recordings with a timeline, and system status. It installs to a phone's home screen.
 
 ```
 Cameras ──RTSP──> go2rtc ─┬─ main ──> recorder ──> /recordings/<camera>/<date>/<hour>/<MM.SS>.mp4
@@ -16,7 +16,39 @@ Cameras ──RTSP──> go2rtc ─┬─ main ──> recorder ──> /record
                                          ├─> /data: events DB + snapshots
                                          ├─> MQTT: bigbrother/events, bigbrother/<camera>/<label>
                                          └─> debug viewer http://localhost:5050
+web app :8090 ── login ──> live video (go2rtc MSE, proxied), events, recordings, settings
 ```
+
+## The app
+
+Open **http://<server>:8090** (set `WEB_PORT` in `.env` to change it).
+
+- **First start:** the app asks for a setup code to create the first account. It's printed
+  in the web service's log, so only someone who can read the server's logs can claim the
+  install:
+  ```bash
+  docker compose logs web | grep "setup code"
+  ```
+- **Accounts:** add more, or reset a forgotten password, from the server:
+  ```bash
+  docker compose exec -it web python -m bigbrother user add NAME
+  docker compose exec -it web python -m bigbrother user passwd NAME
+  docker compose exec web python -m bigbrother user list
+  ```
+- **Live:** video comes straight from go2rtc (MSE, with HLS for older iPhones) through the
+  app's own connection, so it needs no extra ports and shares the login. The grid uses the
+  substreams; opening a camera plays its main stream. Tiles that are off screen or in a
+  background tab stop streaming.
+- **Events:** filter by camera, object, alert outcome and day. Each event has its snapshot,
+  a clip with 5 s before and after, and why an alert was or wasn't sent.
+- **Recordings:** a day timeline per camera (24 h, 6 h or 1 h). Click or drag to play from
+  any moment; playback continues across the 1-minute files and skips gaps. "Save 5 minutes"
+  downloads an MP4.
+- **Phone:** in Safari or Chrome, use "Add to Home Screen". It opens full screen like an app.
+
+**Behind your reverse proxy:** point it at port 8090, with WebSocket upgrades allowed
+(needed for live video). Put the proxy's IP in `TRUSTED_PROXIES` in `.env` so login rate
+limiting sees real client addresses and cookies are marked secure under HTTPS.
 
 ## Test setup on Windows
 
@@ -162,10 +194,10 @@ that way on this PC. On the Proxmox server, set `RECORDINGS_PATH` to a path on t
 
 ## How detection works
 
-1. **Decode the substream.** ffmpeg decodes each camera's substream at `live_fps` (default
-   15) frames per second, scaled to at most 640 px wide. The preview shows every frame.
-   Every third frame (`fps`, default 5) is analysed, and between analyses the boxes move
-   along with each object's velocity.
+1. **Decode the substream.** ffmpeg decodes each camera's substream at `fps` (default 5)
+   frames per second, scaled to at most 640 px wide. Live video in the app comes straight
+   from go2rtc, so nothing is decoded just for viewing. (`live_fps` raises the debug
+   viewer's preview rate, at the cost of CPU.)
 2. **Check for motion.** A cheap motion check runs on every frame. The model only runs
    when something moves, while a moving object is being tracked, or every 30 s to
    re-confirm parked objects. Whole-frame changes (IR switching on, exposure jumps) count
@@ -278,7 +310,20 @@ connection is the one-time model download from GitHub, which is checksum-verifie
 
 ## Security
 
-Only the future web app/API will ever be exposed through the reverse proxy. go2rtc
+Only the web app (8090) is meant to be exposed, through the reverse proxy. go2rtc
 (1984/8554) and the debug viewer (5050) are bound to localhost, and MQTT isn't published at
-all. Keep cameras on an
+all.
+
+The app:
+- Passwords are hashed with scrypt. Sessions are random tokens, stored only as hashes,
+  in HttpOnly SameSite cookies (Secure behind HTTPS).
+- Failed logins are limited to 10 per client and 10 per username per 15 minutes. Signed-in
+  devices stay signed in during a lockout. Changing a password signs out every other device.
+- Every request except the login page and static files needs a session; that includes
+  video, snapshots, clips and the live stream. Requests that change something need a custom
+  header, which blocks cross-site request forgery. Live-stream WebSockets must come from
+  the app's own origin.
+- Only configured cameras' streams can be opened, and only for viewing: go2rtc's admin API
+  and WebRTC aren't reachable through the app.
+- A strict Content-Security-Policy allows only the app's own scripts. Keep cameras on an
 isolated VLAN with no internet access.

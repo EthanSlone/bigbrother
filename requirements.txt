@@ -1,5 +1,6 @@
 PyYAML>=6.0,<7
 paho-mqtt>=2.1,<3
+aiohttp>=3.10,<4   # web app
 numpy>=1.26
 opencv-python-headless>=4.10
 # Inference engines: OpenVINO for Intel CPUs (default); ONNX Runtime as the portable

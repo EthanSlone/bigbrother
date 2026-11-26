@@ -20,15 +20,20 @@ class EventQueries:
         # app works before either has run.
         from ..alerts_db import SCHEMA as ALERTS_SCHEMA
         from ..events_db import SCHEMA as EVENTS_SCHEMA
+        from .feedback import SCHEMA as FEEDBACK_SCHEMA
         self._db.executescript(EVENTS_SCHEMA)
         self._db.executescript(ALERTS_SCHEMA)
+        self._db.executescript(FEEDBACK_SCHEMA)
         cols = {r[1] for r in self._db.execute("PRAGMA table_info(events)")}
         if "zones" not in cols:
             self._db.execute("ALTER TABLE events ADD COLUMN zones TEXT NOT NULL DEFAULT '[]'")
+        if "night" not in cols:
+            self._db.execute("ALTER TABLE events ADD COLUMN night INTEGER NOT NULL DEFAULT 0")
 
     def events(self, *, cameras: list[str] | None = None, labels: list[str] | None = None,
                since: float | None = None, until: float | None = None, before: float | None = None,
-               alert: str | None = None, zone: str | None = None, limit: int = 50) -> list[dict]:
+               alert: str | None = None, zone: str | None = None, review: str | None = None,
+               limit: int = 50) -> list[dict]:
         """Newest first. `before` is a start_ts cursor for paging. `alert`: an alert status,
         or 'notified' for sent+logged."""
         where, args = [], []
@@ -55,8 +60,14 @@ class EventQueries:
         if zone:
             where.append("EXISTS (SELECT 1 FROM json_each(e.zones) WHERE value = ?)")
             args.append(zone)
-        sql = ("SELECT e.*, a.status AS a_status, a.reason AS a_reason, a.verify_score AS a_verify, "
-               "a.sent_ts AS a_sent, a.image AS a_image FROM events e LEFT JOIN alerts a ON a.event_id = e.id")
+        if review == "unreviewed":
+            where.append("f.verdict IS NULL")
+        elif review == "reviewed":
+            where.append("f.verdict IS NOT NULL")
+        elif review in ("correct", "false_alarm", "wrong_label"):
+            where.append("f.verdict = ?")
+            args.append(review)
+        sql = self._SELECT
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY e.start_ts DESC LIMIT ?"
@@ -67,12 +78,14 @@ class EventQueries:
             rows = [dict(zip(cols, r)) for r in cur.fetchall()]
         return [self._out(r) for r in rows]
 
+    _SELECT = ("SELECT e.*, a.status AS a_status, a.reason AS a_reason, a.verify_score AS a_verify, "
+               "a.sent_ts AS a_sent, a.image AS a_image, f.verdict AS f_verdict, f.label AS f_label, "
+               "f.note AS f_note FROM events e LEFT JOIN alerts a ON a.event_id = e.id "
+               "LEFT JOIN event_feedback f ON f.event_id = e.id")
+
     def event(self, event_id: str) -> dict | None:
         with self._lock:
-            cur = self._db.execute(
-                "SELECT e.*, a.status AS a_status, a.reason AS a_reason, a.verify_score AS a_verify, "
-                "a.sent_ts AS a_sent, a.image AS a_image FROM events e LEFT JOIN alerts a ON a.event_id = e.id "
-                "WHERE e.id = ?", (event_id,))
+            cur = self._db.execute(self._SELECT + " WHERE e.id = ?", (event_id,))
             cols = [c[0] for c in cur.description]
             row = cur.fetchone()
         return self._out(dict(zip(cols, row))) if row else None
@@ -95,8 +108,11 @@ class EventQueries:
             "top_score": round(r["top_score"], 3), "median_score": round(r["median_score"], 3),
             "box": [round(v, 1) for v in json.loads(r["box"])], "frame_w": r["frame_w"], "frame_h": r["frame_h"],
             "stationary": bool(r["stationary"]), "has_snapshot": bool(r["snapshot"]),
+            "night": bool(r.get("night") or 0),
             "snapshot": r["snapshot"], "alert_image": r["a_image"],
             "zones": json.loads(r.get("zones") or "[]"), "updated_ts": r["updated_ts"], "alert": alert,
+            "feedback": {"verdict": r["f_verdict"], "label": r["f_label"], "note": r["f_note"] or ""}
+                        if r.get("f_verdict") else None,
         }
 
     def close(self) -> None:

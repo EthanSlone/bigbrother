@@ -20,7 +20,10 @@ alerts:
   verify: true             # second opinion with a bigger model on the full-res frame
   verify_model: yolox_m
   verify_threshold: 0.5
-  # public_url: https://nvr.example.com   # adds a "View clip" link once the app exists
+  # public_url: https://nvr.example.com   # adds a "View clip" link that opens the event in the app
+  health:                  # alerts when the NVR itself has a problem (sent even when disarmed)
+    enabled: true
+    after_minutes: 5       # how long a problem must last before it's reported
   pushover:
     priority: 0            # -2 silent ... 1 high (bypasses quiet hours)
     sound: ""              # "" = your Pushover default
@@ -39,6 +42,12 @@ defaults:
     min_score: 0.2        # weakest detection kept (below 0.5 it can only extend an existing track)
     threshold: 0.6        # median score an object needs to become an event
     min_frames: 3         # ...seen on at least this many frames
+    # thresholds: {dog: 0.5, person: 0.65}   # per-object overrides of threshold
+    motion_sensitivity: normal   # very_low (rain, trees) | low | normal | high (small, far movement)
+    zoom: true            # closer look at small moving things (finds far-away people; extra CPU then)
+    motion_gate: true     # new objects must appear where something moved (ignores look-alikes)
+    night_boost: 0.1      # in infrared footage, events and alerts need this much more score
+    label_vote: true      # a person/dog mix-up becomes one object with the majority label
   alert:
     labels: [person]      # which objects alert
     zones: []             # if set, the object must enter one of these zones
@@ -47,8 +56,9 @@ defaults:
     #   - {days: [mon, tue, wed, thu, fri, sat, sun], start: "22:00", end: "06:30"}
 
 storage:
-  retention_days: 30      # delete recordings older than this
+  retention_days: 30      # delete 24/7 recordings older than this
   max_usage_percent: 90   # if the disk passes this, delete oldest first
+  event_retention_days: 30  # events keep their own clip, snapshot and alert picture this long
 
 # Camera ids: lowercase letters, digits, underscores (e.g. front_door).
 # Annke cameras are Hikvision-based. The usual RTSP paths are:

@@ -9,6 +9,7 @@
     python -m bigbrother test-alert  send one test notification
     python -m bigbrother models      download/verify built-in detection models
     python -m bigbrother evaluate    run clips through detection offline and count events
+    python -m bigbrother evaluate-testset ZIP   score detection settings on an exported test set
     python -m bigbrother web         run the web app (login, live view, events, recordings)
     python -m bigbrother user ...    manage app accounts: list | add NAME | passwd NAME | delete NAME
 """
@@ -18,6 +19,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import json
 import sys
 from pathlib import Path
 
@@ -110,7 +112,7 @@ def _alerter(args) -> int:
     from .alerts.service import run
 
     cfg = load_config(args.config)
-    run(cfg, Path(args.data), Path(args.db))
+    run(cfg, Path(args.data), Path(args.db), Path(args.recordings))
     return 0
 
 
@@ -138,6 +140,33 @@ def _recorder(args) -> int:
 
     cfg = load_config(args.config)
     run(cfg, Path(args.recordings), Path(args.db))
+    return 0
+
+
+def _evaluate_testset(args) -> int:
+    from .config import DetectorSettings
+    from .detector.model_store import resolve_model
+    from .detector.models import load_model, plan_threads
+    from .detector.testset import BEFORE, evaluate_testset, parse_variant
+
+    path, family = resolve_model(args.model)
+    _, threads = plan_threads(1, 0)
+    model = load_model(family or "yolox", path, "openvino", "", threads, DetectorSettings.input_size)
+    variants = {"before": dict(BEFORE), "now": {}}
+    for spec in args.variant or []:
+        name, ov = parse_variant(spec)
+        variants[name] = ov
+    scores = evaluate_testset(Path(args.zip), model, variants)
+    for sc in scores:
+        print(sc.line())
+    ids = sorted({k for sc in scores for k in sc.outcomes})
+    diffs = [i for i in ids if len({sc.outcomes.get(i) for sc in scores}) > 1]
+    if diffs:
+        print("\nWhere the variants disagree (what each produced):")
+        for i in diffs:
+            print(f"  {i}: " + " | ".join(f"{sc.name}: {sc.outcomes.get(i, '-')}" for sc in scores))
+    if args.json:
+        Path(args.json).write_text(json.dumps([sc.__dict__ for sc in scores], indent=1))
     return 0
 
 
@@ -218,6 +247,7 @@ def main(argv: list[str] | None = None) -> int:
     al = sub.add_parser("alerter", help="run the alert service")
     al.add_argument("--data", default="/data")
     al.add_argument("--db", default="/data/bigbrother.db")
+    al.add_argument("--recordings", default="/recordings")
     al.set_defaults(func=_alerter)
 
     ta = sub.add_parser("test-alert", help="send one test notification")
@@ -238,6 +268,13 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--recordings", default="/recordings")
     r.add_argument("--db", default="/data/bigbrother.db")
     r.set_defaults(func=_recorder)
+
+    ts = sub.add_parser("evaluate-testset", help="score detection settings on an exported test set")
+    ts.add_argument("zip")
+    ts.add_argument("--variant", action="append", help='extra settings to try, e.g. "strict:threshold=0.7,zoom=false"')
+    ts.add_argument("--model", default="yolox_s")
+    ts.add_argument("--json", help="also write the scores here")
+    ts.set_defaults(func=_evaluate_testset)
 
     w = sub.add_parser("web", help="run the web app")
     w.add_argument("--data", default="/data")

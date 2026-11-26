@@ -88,19 +88,25 @@ async def status(request: web.Request) -> web.Response:
         disk = {"total": du.total, "used": du.used, "free": du.free,
                 "percent": round(du.used / du.total * 100, 1),
                 "limit_percent": ctx.cfg.storage.max_usage_percent,
-                "retention_days": ctx.cfg.storage.retention_days}
+                "retention_days": ctx.cfg.storage.retention_days,
+                "event_retention_days": ctx.cfg.storage.event_retention_days}
     except OSError:
         pass
     services = {k.split("/")[0]: v for k, v in ctx.status.items() if k.endswith("/available")}
+    health = ctx.status.get("health") if isinstance(ctx.status.get("health"), dict) else None
     return web.json_response({"cameras": cams, "disk": disk, "services": services,
+                              "problems": health["problems"] if health else None,
                               "armed": await asyncio.to_thread(ctx.alerts.armed), "ts": now})
 
 
 # -- armed ------------------------------------------------------------------------------------
 
 async def get_armed(request: web.Request) -> web.Response:
+    """Armed state plus the number of system problems (for the badge on Settings)."""
     ctx = request.app[CTX]
-    return web.json_response({"armed": await asyncio.to_thread(ctx.alerts.armed)})
+    health = ctx.status.get("health")
+    problems = len(health.get("problems", [])) if isinstance(health, dict) else 0
+    return web.json_response({"armed": await asyncio.to_thread(ctx.alerts.armed), "problems": problems})
 
 
 async def set_armed(request: web.Request) -> web.Response:
@@ -133,7 +139,7 @@ async def events(request: web.Request) -> web.Response:
     rows = await asyncio.to_thread(
         ctx.queries.events, cameras=_list(q, "camera"), labels=_list(q, "label"),
         since=_float(q, "since"), until=_float(q, "until"), before=_float(q, "before"),
-        alert=q.get("alert") or None, zone=q.get("zone") or None, limit=limit)
+        alert=q.get("alert") or None, zone=q.get("zone") or None, review=q.get("review") or None, limit=limit)
     return web.json_response([_public_event(e) for e in rows])
 
 

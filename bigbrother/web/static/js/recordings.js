@@ -20,8 +20,17 @@ export async function mount(view, route, sh) {
       <div class="seg" id="zoom" role="group" aria-label="Timeline zoom">${ZOOMS.map(z => `<button data-z="${z}" aria-pressed="${z === zoom}">${z} h</button>`).join('')}</div>
       <button class="btn" id="latest">Latest</button>
       <div style="flex:1"></div>
+      <button class="btn" id="miss" title="Something was in view here but wasn't detected">Report a missed detection</button>
       <button class="btn" id="save" title="Download 5 minutes starting at the playhead">${ICON.download}Save 5 minutes</button>
     </div>
+    <dialog class="sheet" id="missdlg" style="width:min(460px,94vw)" aria-labelledby="miss-title"><form class="form" style="padding:18px" method="dialog">
+      <h2 id="miss-title" style="font-size:var(--step-1);margin:0">Report a missed detection</h2>
+      <p id="miss-when"></p>
+      <label class="field">What was missed<select name="label">${['person', 'car', 'truck', 'motorcycle', 'bicycle', 'dog', 'cat', 'other']
+        .map(l => `<option value="${l}">${l === 'other' ? 'Something else' : esc(labelName(l))}</option>`).join('')}</select></label>
+      <label class="field">Note (optional)<input type="text" name="note" maxlength="300" placeholder="e.g. walked along the fence in the dark"></label>
+      <div style="display:flex;gap:10px"><button class="btn primary" value="send">Report it</button><button class="btn quiet" value="cancel">Cancel</button></div>
+    </form></dialog>
     <div class="player"><video id="v" playsinline controls></video><div class="msg" id="pmsg" hidden></div></div>
     <div class="clock"><b id="clock">–</b><span class="muted" id="clockday"></span></div>
     <div class="scrub" id="scrub" role="slider" tabindex="0" aria-label="Recording timeline"></div>
@@ -47,6 +56,21 @@ export async function mount(view, route, sh) {
   for (const b of $$('#zoom button', root)) b.onclick = () => { zoom = +b.dataset.z;
     for (const x of $$('#zoom button', root)) x.setAttribute('aria-pressed', x === b); draw(); };
   $('#save', root).onclick = save;
+  $('#miss', root).onclick = () => {
+    if (playhead == null) { toast('Pick the moment on the timeline first.'); return; }
+    const v = $('#v', root); v.pause();
+    $('#miss-when', root).textContent = `${state.camById[cam].name}, ${new Date(playhead * 1000).toLocaleString([], {weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit'})}. 10 seconds either side are kept for testing.`;
+    $('#missdlg', root).showModal();
+  };
+  $('#missdlg', root).addEventListener('close', async () => {
+    const d = $('#missdlg', root);
+    if (d.returnValue !== 'send') return;
+    const f = $('form', d);
+    try {
+      await api('/api/misses', {method: 'POST', body: {camera: cam, ts: playhead, label: f.label.value, note: f.note.value}});
+      f.reset(); toast('Reported. It will be part of the next test-set export.');
+    } catch (e) { toast(e.message); }
+  });
 
   const v = $('#v', root);
   v.addEventListener('loadedmetadata', () => {

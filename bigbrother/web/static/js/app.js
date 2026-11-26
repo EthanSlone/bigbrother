@@ -141,6 +141,12 @@ function showArmed(on) {
   b.setAttribute('aria-pressed', on ? 'true' : 'false');
   $('.lamp-text', b).innerHTML = on ? 'Alerts on' : 'Alerts off';
 }
+function showProblems(n) {
+  const a = $('.nav a[data-view=settings]');
+  if (!a) return;
+  a.classList.toggle('alarm', n > 0);
+  a.title = n ? `${n} system problem${n > 1 ? 's' : ''}: see Settings → System status` : '';
+}
 async function toggleArmed() {
   const want = !state.armed;
   try {
@@ -190,9 +196,10 @@ async function start() {
   state.user = s.user;
   await loadCameras();
   renderShell();
-  api('/api/armed').then(r => showArmed(r.armed)).catch(() => {});
+  const poll = () => api('/api/armed').then(r => { showArmed(r.armed); showProblems(r.problems); }).catch(() => {});
+  poll();
   clearInterval(armedTimer);
-  armedTimer = setInterval(() => { if (!document.hidden) api('/api/armed').then(r => showArmed(r.armed)).catch(() => {}); }, 20000);
+  armedTimer = setInterval(() => { if (!document.hidden) poll(); }, 20000);
   if (!location.hash) history.replaceState(null, '', '#/live');
   route();
 }

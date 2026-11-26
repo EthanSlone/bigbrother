@@ -27,6 +27,12 @@ log = logging.getLogger(__name__)
 
 PRE_ROLL = 5.0
 POST_ROLL = 5.0
+ARCHIVE_MAX_SECONDS = 300   # archived clips cover at most the first 5 minutes of an event
+
+
+def archived_clip_path(data_dir: Path, camera: str, event_id: str) -> Path:
+    """Where an event's kept clip lives. It outlasts the 24/7 recordings it was cut from."""
+    return data_dir / "events" / camera / f"{event_id}.mp4"
 CHUNK = 256 * 1024
 MAX_SPAN = 7 * 86400  # longest timeline range served at once
 
@@ -132,6 +138,7 @@ class Playback:
         self.index = index
         self.root = recordings_root
         self.clips = data_dir / "clips"
+        self.data_dir = data_dir
         self.events = events
         self.segment_seconds = segment_seconds
         self._locks: dict[str, threading.Lock] = {}
@@ -144,6 +151,9 @@ class Playback:
         with self._lock:
             lock = self._locks.setdefault(event_id, threading.Lock())
         with lock:
+            kept = archived_clip_path(self.data_dir, e.camera, e.id)
+            if kept.exists():
+                return kept, {"partial": False, "archived": True}
             out = self.clips / e.camera / f"{e.id}.mp4"
             meta_path = out.with_suffix(".json")
             if out.exists() and meta_path.exists():

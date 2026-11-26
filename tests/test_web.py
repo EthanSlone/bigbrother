@@ -92,7 +92,7 @@ def _ctx(tmp_path):
     (tmp_path / "rec").mkdir()
     ctx = WebContext(cfg=cfg, data_dir=tmp_path, recordings_root=tmp_path / "rec",
                      users=UserStore(tmp_path / "web.db"), queries=EventQueries(db), alerts=AlertStore(db),
-                     detector_url="http://127.0.0.1:9", setup_code="ABCD-EFGH")
+                     detector_url="http://127.0.0.1:9", setup_code="ABCD-EFGH", db_path=db)
     ctx.playback = Playback(RecordingIndex(db), tmp_path / "rec", tmp_path, EventStore(db), {"front": 60})
     return ctx
 
@@ -252,3 +252,53 @@ def test_settings_api(tmp_path):
             r = await c.put("/api/config/cameras/front", json={"alert": {"zones": ["nope"]}}, headers=H)
             assert r.status == 400 and "nope" in (await r.json())["error"]
     _run(go())
+
+
+def test_feedback_misses_and_export(tmp_path):
+    import json as _json
+    import zipfile
+    from bigbrother.web.app import create_app
+    ctx = _ctx(tmp_path)
+    ctx.users.add("ethan", PW)
+    store = EventStore(tmp_path / "bb.db")
+    for i, label in enumerate(["person", "person", "dog"]):
+        store.save(Event(f"e{i}", "front", label, 1000.0 + i, 1005.0 + i, 0.9, 0.8, [1, 2, 30, 40], 160, 90,
+                         False, None, 1006.0 + i))
+
+    async def go():
+        async with TestClient(TestServer(create_app(ctx))) as c:
+            await c.post("/api/login", json={"username": "ethan", "password": PW}, headers=H)
+            assert (await c.put("/api/events/e0/feedback", json={"verdict": "false_alarm"})).status == 403
+            assert (await c.put("/api/events/e0/feedback", json={"verdict": "false_alarm"}, headers=H)).status == 200
+            r = await c.put("/api/events/e2/feedback", json={"verdict": "wrong_label"}, headers=H)
+            assert r.status == 400                                   # needs the right object
+            await c.put("/api/events/e2/feedback", json={"verdict": "wrong_label", "label": "cat"}, headers=H)
+            assert (await c.put("/api/events/nope/feedback", json={"verdict": "correct"}, headers=H)).status == 404
+            fa = await (await c.get("/api/events?review=false_alarm")).json()
+            assert [e["id"] for e in fa] == ["e0"] and fa[0]["feedback"]["verdict"] == "false_alarm"
+            todo = await (await c.get("/api/events?review=unreviewed")).json()
+            assert [e["id"] for e in todo] == ["e1"]
+            r = await c.post("/api/misses", json={"camera": "front", "ts": 1500.0, "label": "person",
+                                                  "note": "by the fence"}, headers=H)
+            assert r.status == 200
+            assert (await c.post("/api/misses", json={"camera": "nope", "ts": 1.0, "label": "person"},
+                                 headers=H)).status == 400
+            counts = await (await c.get("/api/feedback")).json()
+            assert counts == {"correct": 0, "false_alarm": 1, "wrong_label": 1, "missed": 1}
+            job = await (await c.post("/api/testset", json={"include_unreviewed": 50}, headers=H)).json()
+            for _ in range(100):
+                job = await (await c.get(f"/api/testset/{job['id']}")).json()
+                if job["state"] != "running":
+                    break
+                await asyncio.sleep(0.05)
+            assert job["state"] == "done", job
+            r = await c.get(f"/media/testset/{job['id']}.zip")
+            assert r.status == 200
+            (tmp_path / "t.zip").write_bytes(await r.read())
+    _run(go())
+    with zipfile.ZipFile(tmp_path / "t.zip") as z:
+        m = _json.loads(z.read("manifest.json"))
+    assert {e["id"]: (e["feedback"] or {}).get("verdict") for e in m["events"]} == \
+        {"e0": "false_alarm", "e2": "wrong_label", "e1": None}
+    assert m["missed"][0]["note"] == "by the fence"
+    assert "rtsp" not in _json.dumps(m)                               # no stream addresses

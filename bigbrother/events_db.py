@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS events (
     stationary    INTEGER NOT NULL DEFAULT 0,
     snapshot      TEXT,              -- path relative to the data dir
     updated_ts    REAL NOT NULL,
-    zones         TEXT NOT NULL DEFAULT '[]'  -- JSON list of zones entered, in order
+    zones         TEXT NOT NULL DEFAULT '[]', -- JSON list of zones entered, in order
+    night         INTEGER NOT NULL DEFAULT 0  -- seen in infrared (black-and-white) footage
 );
 CREATE INDEX IF NOT EXISTS idx_events_camera_start ON events(camera, start_ts);
 CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_ts);
@@ -46,6 +47,7 @@ class Event:
     snapshot: str | None
     updated_ts: float
     zones: list[str] = field(default_factory=list)
+    night: bool = False
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -69,16 +71,18 @@ class EventStore:
         cols = {r[1] for r in self._db.execute("PRAGMA table_info(events)")}
         if "zones" not in cols:  # databases created before zones existed
             self._db.execute("ALTER TABLE events ADD COLUMN zones TEXT NOT NULL DEFAULT '[]'")
+        if "night" not in cols:
+            self._db.execute("ALTER TABLE events ADD COLUMN night INTEGER NOT NULL DEFAULT 0")
 
     def save(self, e: Event) -> None:
         with self._lock:
             self._db.execute(
                 "INSERT OR REPLACE INTO events (id, camera, label, start_ts, end_ts, top_score, "
-                "median_score, box, frame_w, frame_h, stationary, snapshot, updated_ts, zones) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "median_score, box, frame_w, frame_h, stationary, snapshot, updated_ts, zones, night) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (e.id, e.camera, e.label, e.start_ts, e.end_ts, e.top_score, e.median_score,
                  json.dumps(e.box), e.frame_w, e.frame_h, int(e.stationary), e.snapshot, e.updated_ts,
-                 json.dumps(e.zones)),
+                 json.dumps(e.zones), int(e.night)),
             )
 
     def close_open(self, now: float) -> int:
@@ -114,6 +118,7 @@ class EventStore:
         r["box"] = json.loads(r["box"])
         r["zones"] = json.loads(r.get("zones") or "[]")
         r["stationary"] = bool(r["stationary"])
+        r["night"] = bool(r.get("night", 0))
         return Event(**r)
 
     def delete_older_than(self, cutoff_ts: float, limit: int = 1000) -> list[Event]:

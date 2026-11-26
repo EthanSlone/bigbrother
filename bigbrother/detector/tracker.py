@@ -27,7 +27,14 @@ from .models import Detection
 
 # Labels the model often confuses with each other; treated as one kind of object for matching.
 LABEL_GROUPS = {"car": "vehicle", "truck": "vehicle", "bus": "vehicle",
-                "motorcycle": "cycle", "bicycle": "cycle"}
+                "motorcycle": "cycle", "bicycle": "cycle",
+                "dog": "animal", "cat": "animal", "bird": "animal", "horse": "animal", "sheep": "animal",
+                "cow": "animal", "bear": "animal"}
+# People and animals get mixed up at night and at a distance (a dog called a person for a few
+# frames). With label voting, a strongly overlapping detection of the other kind updates the same
+# object and adds a vote, instead of starting a second, wrongly-labelled object.
+LOOKALIKE_GROUPS = {"person", "animal"}
+CROSS_MATCH_IOU = 0.5
 
 Box = tuple[float, float, float, float]
 
@@ -76,6 +83,12 @@ class Track:
         return max(self.label_votes, key=self.label_votes.get)
 
     @property
+    def label_share(self) -> float:
+        """How clearly the winning label won (1.0 = every vote agreed)."""
+        total = sum(self.label_votes.values())
+        return self.label_votes[self.label] / total if total else 0.0
+
+    @property
     def median_score(self) -> float:
         return statistics.median(self.scores) if self.scores else 0.0
 
@@ -95,7 +108,7 @@ class Tracker:
     def __init__(self, high_score: float = 0.5, match_iou: float = 0.2, max_misses: int = 2,
                  lost_seconds: float = 2.0, jump_base: float = 0.5, jump_per_second: float = 1.5,
                  stationary_seconds: float = 10.0, stationary_move: float = 0.15,
-                 start_ids: int = 1):
+                 start_ids: int = 1, label_vote: bool = True):
         self.high_score = high_score
         self.match_iou = match_iou
         # A track ends once it has missed at least `max_misses` detection runs AND has
@@ -106,14 +119,18 @@ class Tracker:
         self.jump_per_second = jump_per_second  # ...plus this much per second since last seen
         self.stationary_seconds = stationary_seconds
         self.stationary_move = stationary_move  # movement (fraction of object size) that counts as moving
+        self.label_vote = label_vote
         self.tracks: list[Track] = []
         self._ids = itertools.count(start_ids)
 
     def has_moving(self) -> bool:
         return any(not t.stationary for t in self.tracks)
 
-    def update(self, dets: list[Detection], ts: float) -> list[Track]:
-        """Feed one frame's detections. Returns tracks that ended on this frame."""
+    def update(self, dets: list[Detection], ts: float, can_start=None) -> list[Track]:
+        """Feed one frame's detections. Returns tracks that ended on this frame.
+
+        `can_start(det)` decides whether an unmatched confident detection may start a new
+        object (e.g. only where something moved)."""
         unmatched_tracks = list(self.tracks)
         high = [d for d in dets if d.score >= self.high_score]
         low = [d for d in dets if d.score < self.high_score]
@@ -130,9 +147,13 @@ class Tracker:
             self.tracks = [t for t in self.tracks if t not in ended]
 
         for d in leftover_high:
+            if can_start is not None and not can_start(d):
+                continue
             t = Track(id=next(self._ids), group=group_of(d.label), box=d.box, first_ts=ts, last_ts=ts)
             t.scores.append(d.score)
             t.label_votes[d.label] = d.score
+            for lbl, sc in d.votes:
+                t.label_votes[lbl] = t.label_votes.get(lbl, 0.0) + sc
             t.history.append((ts, center(d.box)))
             t.last_det_score = d.score
             self.tracks.append(t)
@@ -153,6 +174,9 @@ class Tracker:
             allowed = self.jump_base + self.jump_per_second * min(max(ts - t.last_ts, 0.0), 3.0)
             for di, d in enumerate(dets):
                 if group_of(d.label) != t.group:
+                    if (self.label_vote and t.group in LOOKALIKE_GROUPS and group_of(d.label) in LOOKALIKE_GROUPS
+                            and (overlap := iou(pred, d.box)) >= CROSS_MATCH_IOU):
+                        pairs.append((0.75 + overlap * 0.5, ti, di))   # below same-kind overlap matches
                     continue
                 overlap = iou(pred, d.box)
                 if overlap >= self.match_iou:
@@ -204,6 +228,8 @@ class Tracker:
         t.scores.append(d.score)
         t.last_det_score = d.score
         t.label_votes[d.label] = t.label_votes.get(d.label, 0.0) + d.score
+        for lbl, sc in d.votes:
+            t.label_votes[lbl] = t.label_votes.get(lbl, 0.0) + sc
         t.history.append((ts, center(d.box)))
         self._update_stationary(t, ts)
 

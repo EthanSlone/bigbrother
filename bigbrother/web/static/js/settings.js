@@ -1,4 +1,4 @@
-import {$, $$, api, esc, state, go, toast, labelName, loadCameras, ICON} from './app.js';
+import {$, $$, api, esc, state, go, toast, labelName, loadCameras, camName, ICON} from './app.js';
 
 export const SECTIONS = {
   status: {title: 'System status', render: renderStatus},
@@ -6,6 +6,7 @@ export const SECTIONS = {
   zones: {title: 'Zones and masks', render: renderZones},
   alerts: {title: 'Alerts', render: renderAlerts},
   recording: {title: 'Recording', render: renderRecording},
+  feedback: {title: 'Detection feedback', render: renderFeedback},
   account: {title: 'Account', render: renderAccount},
 };
 
@@ -88,13 +89,18 @@ async function renderStatus(panel, _r, setTimer) {
     }).join('');
     const svc = Object.entries(s.services || {}).map(([k, v]) =>
       `<span style="margin-right:22px"><span class="dot ${v === 'online' ? 'ok' : 'bad'}"></span>${esc(k.charAt(0).toUpperCase() + k.slice(1))}</span>`).join('');
+    const probs = s.problems || [];
     el.innerHTML = `
+      ${s.problems == null ? '<p class="muted" style="margin-bottom:18px">Health checks start once the alert service is running.</p>'
+        : probs.length ? `<div class="problems" role="alert">${probs.map(p => `<div class="problem">${esc(p.message)}
+            <span>Since ${new Date(p.since * 1000).toLocaleString([], {weekday: 'short', hour: 'numeric', minute: '2-digit'})}${p.notified ? ', alert sent' : ''}</span></div>`).join('')}</div>`
+        : '<p style="margin-bottom:18px"><span class="dot ok"></span>Everything is working.</p>'}
       <table class="health"><thead><tr><th>Camera</th><th>Recording</th><th>Detection</th>
         <th class="num" title="How long the model takes per frame">Model</th>
         <th class="num" title="Time a frame waits behind other cameras. If this stays high, the server needs more CPU.">Queue</th>
         <th class="num">Events today</th></tr></thead><tbody>${rows}</tbody></table>
       ${d ? `<div style="margin-top:26px"><h3>Storage</h3>
-        <p>${GB(d.used)} of ${GB(d.total)} used (${d.percent}%). Recordings are kept ${d.retention_days} days; if the disk passes ${d.limit_percent}%, the oldest are deleted first.</p>
+        <p>${GB(d.used)} of ${GB(d.total)} used (${d.percent}%). 24/7 recordings are kept ${d.retention_days} days and events ${d.event_retention_days} days; if the disk passes ${d.limit_percent}%, the oldest recordings are deleted first.</p>
         <div class="meter" style="margin-top:10px" role="img" aria-label="Disk ${d.percent}% full"><i style="width:${d.percent}%"></i><b style="left:${d.limit_percent}%"></b></div></div>` : ''}
       ${svc ? `<div style="margin-top:26px"><h3>Services</h3><p>${svc}</p></div>` : ''}`;
   };
@@ -178,6 +184,17 @@ function cameraForm(panel, cfg, id) {
     <label class="check"><input type="checkbox" name="record" ${!(c.record && c.record.enabled === false) ? 'checked' : ''}> Record 24/7</label>
     <label class="check"><input type="checkbox" name="detect" ${det.enabled !== false ? 'checked' : ''}> Detect objects</label>
     <div><h3>Objects to detect</h3><div class="chips" id="labels">${objChips(cfg.objects, labels)}</div></div>
+    <div class="form" style="gap:12px"><h3>Detection tuning</h3>
+      <div class="two"><label class="field">Motion sensitivity
+        <select name="msens">${[['very_low', 'Very low (rain, trees, busy street)'], ['low', 'Low'], ['normal', 'Normal'], ['high', 'High (small or far-away movement)']]
+          .map(([v, t]) => `<option value="${v}" ${(det.motion_sensitivity || 'normal') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <label class="field">How sure before it's an event
+        <select name="strict">${[[0.5, 'Relaxed (catches more, more false alarms)'], [0.6, 'Normal'], [0.7, 'Strict (fewer false alarms)'], [0.8, 'Very strict']]
+          .map(([v, t]) => `<option value="${v}" ${Math.abs((det.threshold ?? 0.6) - v) < 0.001 ? 'selected' : ''}>${t}</option>`).join('')}
+          ${[0.5, 0.6, 0.7, 0.8].some(v => Math.abs((det.threshold ?? 0.6) - v) < 0.001) ? '' : `<option value="${det.threshold}" selected>Custom (${det.threshold})</option>`}</select></label></div>
+      <label class="check"><input type="checkbox" name="zoom" ${det.zoom !== false ? 'checked' : ''}> Take a closer look at small moving things (finds far-away people; uses more CPU when something small moves)</label>
+      <label class="check"><input type="checkbox" name="gate" ${det.motion_gate !== false ? 'checked' : ''}> Only start tracking objects where something moved (ignores look-alikes such as a coat on a chair)</label>
+    </div>
     <p class="error" role="alert" hidden></p>
     <div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" type="submit">${id ? 'Save camera' : 'Add camera'}</button>
       <a class="btn quiet" href="#/settings/cameras">Cancel</a><span style="flex:1"></span>
@@ -202,7 +219,8 @@ function cameraForm(panel, cfg, id) {
     }
     const lab = picked($('#labels', f));
     if (!lab.length) { err.textContent = 'Pick at least one object to detect.'; err.hidden = false; return; }
-    const body = {name: v.name.trim(), streams, record: {enabled: !!v.record}, detect: {enabled: !!v.detect, labels: lab}};
+    const body = {name: v.name.trim(), streams, record: {enabled: !!v.record}, detect: {enabled: !!v.detect, labels: lab,
+      motion_sensitivity: v.msens, threshold: +v.strict, zoom: !!v.zoom, motion_gate: !!v.gate}};
     try {
       if (id) await save('PUT', `/api/config/cameras/${encodeURIComponent(id)}`, body, 'Camera saved');
       else await save('POST', '/api/config/cameras', {id: (v.id || '').trim(), ...body}, 'Camera added');
@@ -441,7 +459,9 @@ async function renderRecording(panel) {
   panel.innerHTML = `<h2>Recording</h2>
     <p>Every camera with recording on is saved 24/7 in 1-minute files. Old recordings are deleted automatically.</p>
     <form class="form" id="recf">
-      <label class="field">Keep recordings for (days)<input type="number" name="days" min="1" max="3650" value="${esc(st.retention_days ?? 30)}"></label>
+      <label class="field">Keep 24/7 recordings for (days)<input type="number" name="days" min="1" max="3650" value="${esc(st.retention_days ?? 30)}"></label>
+      <label class="field">Keep events, with their clips and snapshots, for (days)<input type="number" name="edays" min="1" max="3650" value="${esc(st.event_retention_days ?? 30)}"></label>
+      <p>Each event's clip is saved separately as soon as it's recorded, so events can be kept longer than the 24/7 footage at a fraction of the space.</p>
       <label class="field">Delete the oldest early if the disk gets fuller than (%)<input type="number" name="pct" min="10" max="99" value="${esc(st.max_usage_percent ?? 90)}"></label>
       ${disk ? `<p>The disk is ${disk.percent}% full: ${GB(disk.used)} of ${GB(disk.total)}.</p>` : ''}
       <p class="error" role="alert" hidden></p>
@@ -450,8 +470,63 @@ async function renderRecording(panel) {
   const f = $('#recf', panel);
   f.onsubmit = async e => {
     e.preventDefault();
-    try { await save('PUT', '/api/config/settings', {storage: {retention_days: +f.days.value, max_usage_percent: +f.pct.value}}, 'Recording settings saved'); }
+    try { await save('PUT', '/api/config/settings', {storage: {retention_days: +f.days.value, max_usage_percent: +f.pct.value, event_retention_days: +f.edays.value}}, 'Recording settings saved'); }
     catch (ex) { formError($('.error', f), ex); }
+  };
+}
+
+// ---------- detection feedback ----------
+async function renderFeedback(panel, _r, setTimer) {
+  let counts, misses;
+  try { [counts, misses] = await Promise.all([api('/api/feedback'), api('/api/misses')]); } catch { return; }
+  const total = counts.correct + counts.false_alarm + counts.wrong_label;
+  panel.innerHTML = `<h2>Detection feedback</h2>
+    <p>Your verdicts on events, and detections you report as missed, are how detection gets tuned to your cameras.
+      Mark events from the Events page (open one: "Was this right?"). Report misses from Recordings.</p>
+    <div class="rows">
+      <div class="row"><div class="t"><b>${total} event${total === 1 ? '' : 's'} reviewed</b>
+        <span>${counts.correct} correct, ${counts.false_alarm} false alarm${counts.false_alarm === 1 ? '' : 's'}, ${counts.wrong_label} wrong object</span></div>
+        <a class="btn" href="#/events?review=unreviewed">Review events</a></div>
+      <div class="row"><div class="t"><b>${counts.missed} missed detection${counts.missed === 1 ? '' : 's'} reported</b>
+        <span>Each keeps 20 seconds of video, even after the 24/7 recording is deleted.</span></div>
+        <a class="btn" href="#/recordings">Open recordings</a></div>
+    </div>
+    <form class="form" id="exp">
+      <h3>Export a test set</h3>
+      <p>Builds a zip of every reviewed event and reported miss: snapshots, alert pictures and small clips (960 px, 5 fps).
+        No passwords or camera addresses are included. Attach it in the chat to have detection changes measured on your own footage.</p>
+      <label class="check"><input type="checkbox" name="extra" checked> Also include the 50 most recent events you haven't reviewed</label>
+      <p class="error" role="alert" hidden></p>
+      <div style="display:flex;gap:12px;align-items:center"><button class="btn primary" type="submit">Build export</button><span id="expstate" class="muted"></span></div>
+    </form>
+    ${misses.length ? `<div><h3>Reported misses</h3><div class="rows">${misses.map(m => `<div class="row"><div class="t">
+        <b>${esc(labelName(m.label))} on ${esc(camName(m.camera))}</b>
+        <span>${new Date(m.ts * 1000).toLocaleString([], {weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'})}${m.note ? `. ${esc(m.note)}` : ''}${m.has_clip ? '' : '. Saving its clip…'}</span></div>
+        <div style="display:flex;gap:6px">${m.has_clip ? `<a class="btn quiet" href="/media/missed/${esc(m.id)}.mp4" target="_blank" rel="noopener">${ICON.play}Play</a>` : ''}
+          <button class="btn quiet" data-del="${esc(m.id)}" aria-label="Delete this report">${ICON.close}</button></div></div>`).join('')}</div></div>` : ''}`;
+  for (const b of $$('[data-del]', panel)) b.onclick = async () => {
+    await api(`/api/misses/${encodeURIComponent(b.dataset.del)}`, {method: 'DELETE'}).catch(e => toast(e.message));
+    renderFeedback(panel, _r, setTimer);
+  };
+  const f = $('#exp', panel), st = $('#expstate', panel);
+  const follow = job => {
+    const tick = async () => {
+      let j;
+      try { j = await api(`/api/testset/${job.id}`); } catch { return; }
+      if (!$('#expstate', panel)) return;
+      if (j.state === 'running') { st.textContent = `Building… ${j.done} of ${j.total || '?'}`; return; }
+      clearInterval(t);
+      $('button', f).disabled = false;
+      if (j.state === 'failed') { st.textContent = `Export failed: ${j.error}`; return; }
+      st.innerHTML = `Ready: <a href="/media/testset/${esc(j.id)}.zip" download>${esc(j.file)}</a> (${(j.size / 1e6).toFixed(1)} MB)`;
+    };
+    const t = setInterval(tick, 1500); setTimer(t); tick();
+  };
+  f.onsubmit = async e => {
+    e.preventDefault();
+    $('button', f).disabled = true; st.textContent = 'Starting…';
+    try { follow(await api('/api/testset', {method: 'POST', body: {include_unreviewed: f.extra.checked ? 50 : 0}})); }
+    catch (ex) { $('button', f).disabled = false; formError($('.error', f), ex); }
   };
 }
 

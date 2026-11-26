@@ -18,6 +18,9 @@ WORK_WIDTH = 320
 @dataclass
 class MotionResult:
     boxes: list[tuple[int, int, int, int]] = field(default_factory=list)  # in frame pixels
+    # Smaller moving areas (down to a quarter of min_area): too small to wake the model on their
+    # own, but enough to let a far-away object start being tracked, or to get a closer look.
+    small_boxes: list[tuple[int, int, int, int]] = field(default_factory=list)
     fraction: float = 0.0       # share of the frame that changed
     lighting_change: bool = False
 
@@ -68,10 +71,12 @@ class MotionDetector:
         cv2.accumulateWeighted(gray, self._bg, self.learn_rate)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         min_px = self.min_area * mask.size
-        boxes = []
+        boxes, small = [], []
         for c in contours:
-            if cv2.contourArea(c) < min_px:
+            area = cv2.contourArea(c)
+            if area < min_px / 4:
                 continue
             x, y, bw, bh = cv2.boundingRect(c)
-            boxes.append((int(x / scale), int(y / scale), int((x + bw) / scale), int((y + bh) / scale)))
-        return MotionResult(boxes=boxes, fraction=fraction)
+            b = (int(x / scale), int(y / scale), int((x + bw) / scale), int((y + bh) / scale))
+            (boxes if area >= min_px else small).append(b)
+        return MotionResult(boxes=boxes, small_boxes=small, fraction=fraction)

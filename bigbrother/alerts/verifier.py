@@ -56,6 +56,9 @@ def crop_region(box_norm, frame_w: int, frame_h: int) -> tuple[int, int, int, in
     return left, top, left + int(side), top + int(side)
 
 
+NIGHT_BOOST = 0.1   # infrared footage: the second opinion must be this much surer
+
+
 class Verifier:
     def __init__(self, model, threshold: float):
         self.model = model
@@ -73,10 +76,15 @@ class Verifier:
         dets = self.model.detect(crop, min_score=0.25)
         same = [d for d in dets if group_of(d.label) == group]
         if not same:
-            return VerifyResult(False, 0.0, None, f"second opinion found no {event['label']}")
+            other = max((d for d in dets if d.score >= 0.5), key=lambda d: d.score, default=None)
+            why = (f"second opinion saw a {other.label}, not a {event['label']}" if other
+                   else f"second opinion found no {event['label']}")
+            return VerifyResult(False, 0.0, None, why)
         best = max(same, key=lambda d: d.score)
         full_box = (best.box[0] + l, best.box[1] + t, best.box[2] + l, best.box[3] + t)
-        if best.score < self.threshold:
+        threshold = min(0.95, self.threshold + (NIGHT_BOOST if event.get("night") else 0.0))
+        if best.score < threshold:
+            night = " at night" if event.get("night") else ""
             return VerifyResult(False, best.score, full_box,
-                                f"second opinion unsure ({best.label} {best.score:.2f} < {self.threshold:.2f})")
+                                f"second opinion unsure{night} ({best.label} {best.score:.2f} < {threshold:.2f})")
         return VerifyResult(True, best.score, full_box)

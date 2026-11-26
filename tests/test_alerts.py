@@ -270,3 +270,44 @@ def test_snapshot_fallback_when_full_res_grab_lags(tmp_path):
 
 def test_log_notifier_marks_alerts_logged():
     assert LogNotifier().send(Message("t", "b")).status == "logged"
+
+
+# -- health alerts -----------------------------------------------------------------------
+
+def test_health_monitor_reports_once_then_all_clear():
+    from bigbrother.alerts.health import HealthMonitor
+    now = [0.0]
+    m = HealthMonitor(after=300, clock=lambda: now[0])
+    assert m.update({"rec:a": "A isn't recording"}) == ([], [])          # too new to report
+    now[0] = 299
+    assert m.update({"rec:a": "A isn't recording"}) == ([], [])
+    now[0] = 300
+    assert m.update({"rec:a": "A isn't recording"}) == (["A isn't recording"], [])
+    now[0] = 400
+    assert m.update({"rec:a": "A isn't recording"}) == ([], [])          # no repeat
+    now[0] = 500
+    assert m.update({}) == ([], ["A isn't recording"])                   # all clear
+    m.update({"rec:b": "blip"})
+    now[0] = 520
+    assert m.update({}) == ([], [])     # never reported, so no all-clear either
+
+
+def test_find_problems():
+    from bigbrother.alerts.health import find_problems
+    from bigbrother.config import parse_config
+    cfg = parse_config({"storage": {"max_usage_percent": 85}, "cameras": {
+        "a": {"name": "Alpha", "streams": {"main": "rtsp://h/1"}},
+        "b": {"name": "Bravo", "streams": {"main": "rtsp://h/2"}, "detect": {"enabled": False}}}})
+    base = dict(now=10_000.0, started=0.0, recorder_state={}, available={"recorder": "online", "detector": "online"},
+                latest={"a": 9_990.0, "b": 9_990.0}, detector={"a": {"state": "running"}}, go2rtc_ok=True,
+                disk=(500e9, 1000e9))
+    assert find_problems(cfg, **base) == {}
+    p = find_problems(cfg, **{**base, "latest": {"a": 9_000.0, "b": 9_990.0},
+                               "recorder_state": {"a": {"state": "error", "detail": "connection refused"}}})
+    assert set(p) == {"rec:a"} and "connection refused" in p["rec:a"] and "Alpha" in p["rec:a"]
+    p = find_problems(cfg, **{**base, "detector": {"a": {"state": "error", "error": "stream unavailable"}}})
+    assert set(p) == {"det:a"}                         # b has detection off: never reported
+    assert set(find_problems(cfg, **{**base, "disk": (950e9, 1000e9)})) == {"disk"}
+    assert set(find_problems(cfg, **{**base, "available": {"recorder": "offline"}})) == {"svc:recorder"}
+    assert "svc:go2rtc" in find_problems(cfg, **{**base, "go2rtc_ok": False})
+    assert "svc:detector" in find_problems(cfg, **{**base, "detector": None})

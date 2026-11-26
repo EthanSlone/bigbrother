@@ -83,6 +83,11 @@ class RecordingIndex:
             ).fetchall()
         return [(r[0], Segment(*r[1:])) for r in rows]
 
+    def latest_end(self, camera: str) -> float | None:
+        with self._lock:
+            r = self._db.execute("SELECT MAX(end_ts) FROM recordings WHERE camera = ?", (camera,)).fetchone()
+        return r[0] if r else None
+
     def by_id(self, row_id: int) -> Segment | None:
         with self._lock:
             r = self._db.execute(

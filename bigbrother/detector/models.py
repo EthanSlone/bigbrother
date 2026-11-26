@@ -40,6 +40,7 @@ class Detection:
     label: str
     score: float
     box: tuple[float, float, float, float]  # x1, y1, x2, y2 in source-image pixels
+    votes: tuple[tuple[str, float], ...] = ()  # other labels the model gave this same object
 
     @property
     def area(self) -> float:

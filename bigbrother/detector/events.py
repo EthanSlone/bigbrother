@@ -69,13 +69,15 @@ class EventManager:
         self.started = 0
 
     # -- main entry ------------------------------------------------------
-    def process(self, tracks: list[Track], ended: list[Track], frame: np.ndarray, ts: float) -> None:
+    def process(self, tracks: list[Track], ended: list[Track], frame: np.ndarray, ts: float,
+                night: bool = False) -> None:
         h, w = frame.shape[:2]
         for t in tracks:
             st = self._states.setdefault(t.id, _State())
             if st.event is None:
-                if self._confirmed(t):
+                if self._confirmed(t, night):
                     self._start(t, st, frame, w, h, ts)
+                    st.event.night = night
                 continue
             self._ongoing(t, st, frame, w, h, ts)
 
@@ -96,16 +98,24 @@ class EventManager:
                 self.publish("events", {"type": "end", "event": st.event.to_dict()}, False)
         self._states.clear()
 
-    def _confirmed(self, t: Track) -> bool:
-        """Seen long enough, and either consistently confident or at least once very confident."""
+    def _confirmed(self, t: Track, night: bool = False) -> bool:
+        """Seen long enough, and either consistently confident or at least once very confident.
+
+        Each object kind can have its own threshold. In infrared footage the bar is higher and
+        one more sighting is needed. With label voting, a person/animal mix-up waits until one
+        label clearly wins (or has been seen twice as long)."""
         s = self.settings
         if t.hits < 2:
             return False
-        seen_long_enough = t.hits >= s.min_frames or (t.last_ts - t.first_ts) >= (s.min_frames - 1) / s.fps
+        min_frames = s.min_frames + (1 if night and s.night_boost > 0 else 0)
+        threshold = min(0.95, s.threshold_for(t.label) + (s.night_boost if night else 0.0))
+        seen_long_enough = t.hits >= min_frames or (t.last_ts - t.first_ts) >= (min_frames - 1) / s.fps
         if not seen_long_enough:
             return False
-        return t.median_score >= s.threshold or (
-            t.top_score >= min(0.95, s.threshold + 0.2) and t.hits >= s.min_frames)
+        if s.label_vote and t.label_share < 0.6 and t.hits < 2 * min_frames:
+            return False
+        return t.median_score >= threshold or (
+            t.top_score >= min(0.95, threshold + 0.2) and t.hits >= min_frames)
 
     # -- lifecycle -------------------------------------------------------
     def _start(self, t: Track, st: _State, frame: np.ndarray, w: int, h: int, ts: float) -> None:

@@ -13,7 +13,6 @@ import ipaddress
 import json
 import logging
 import os
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -63,6 +62,16 @@ class WebContext:
     session: aiohttp.ClientSession | None = None
     config_path: Path = Path("/config/cameras.yml")
     editor: object = None            # ConfigEditor, created on first use
+    db_path: Path = Path("/data/bigbrother.db")
+    _feedback: object = None
+    exports: dict = field(default_factory=dict)   # test-set export jobs by id
+
+    @property
+    def feedback(self):
+        if self._feedback is None:
+            from .feedback import FeedbackStore
+            self._feedback = FeedbackStore(self.db_path)
+        return self._feedback
 
     # -- request helpers ------------------------------------------------------------
     def client_ip(self, request: web.Request) -> str:
@@ -277,7 +286,7 @@ async def service_worker(request: web.Request) -> web.FileResponse:
 # -- app factory --------------------------------------------------------------------------
 
 def create_app(ctx: WebContext) -> web.Application:
-    from . import api, live, settings_api
+    from . import api, feedback_api, live, settings_api
 
     app = web.Application(middlewares=[security_headers, require_login], client_max_size=2 * 1024 * 1024)
     app[CTX] = ctx
@@ -294,6 +303,7 @@ def create_app(ctx: WebContext) -> web.Application:
     api.register(app)
     live.register(app)
     settings_api.register(app)
+    feedback_api.register(app)
 
     async def on_startup(app: web.Application) -> None:
         ctx.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=5))
@@ -310,7 +320,7 @@ def create_app(ctx: WebContext) -> web.Application:
 def run(cfg: Config, data_dir: Path, db_path: Path, recordings_root: Path, port: int,
         config_path: Path = Path("/config/cameras.yml")) -> None:
     ctx = WebContext(
-        cfg=cfg, data_dir=data_dir, recordings_root=recordings_root, config_path=config_path,
+        cfg=cfg, data_dir=data_dir, recordings_root=recordings_root, config_path=config_path, db_path=db_path,
         users=UserStore(data_dir / "web.db"), queries=EventQueries(db_path), alerts=AlertStore(db_path),
         detector_url=os.environ.get("BB_DETECTOR_URL", "http://detector:5050").rstrip("/"),
         trusted_proxies=_nets(os.environ.get("BB_TRUSTED_PROXIES", "")),
@@ -341,6 +351,7 @@ def run(cfg: Config, data_dir: Path, db_path: Path, recordings_root: Path, port:
         ctx.mqtt.subscribe("recorder/+/state", on_status)
         ctx.mqtt.subscribe("alerts/armed", on_status)
         ctx.mqtt.subscribe("+/available", on_status)
+        ctx.mqtt.subscribe("health", on_status)
         ctx.mqtt.start()
 
     log.info("web app on port %d", port)

@@ -204,14 +204,15 @@ that way on this PC. On the Proxmox server, set `RECORDINGS_PATH` to a path on t
 | `docker compose up -d` | Starts go2rtc, mosquitto, the recorder, the detector and the alerter |
 | `docker compose logs -f detector` | Detector log; per-camera stats print every minute |
 | `docker compose run --rm tools evaluate /testdata/parking_lot.mp4 --fps 5 2` | Runs a clip through detection offline and counts events, to compare settings |
+| `docker compose run --rm -v "$PWD:/w" tools evaluate-testset /w/testset.zip` | Scores detection settings on a test set exported from the app (see below) |
 | `docker compose restart go2rtc recorder` | Applies camera changes after re-running `configure` |
 
 ## How detection works
 
 1. **Decode the substream.** ffmpeg decodes each camera's substream at `fps` (default 5)
-   frames per second, scaled to at most 640 px wide. Live video in the app comes straight
-   from go2rtc, so nothing is decoded just for viewing. (`live_fps` raises the debug
-   viewer's preview rate, at the cost of CPU.)
+   frames per second, at up to 1280 px wide. The model looks at the whole frame at 640 px;
+   the extra resolution is for zoom (step 3). Live video in the app comes straight from
+   go2rtc, so nothing is decoded just for viewing.
 2. **Check for motion.** A cheap motion check runs on every frame. The model only runs
    when something moves, while a moving object is being tracked, or every 30 s to
    re-confirm parked objects. Whole-frame changes (IR switching on, exposure jumps) count
@@ -224,16 +225,36 @@ that way on this PC. On the Proxmox server, set `RECORDINGS_PATH` to a path on t
    The model runs at 640x384 rather than its native 640x640: camera frames are 16:9, so
    a square input is ~40% grey padding. Same detections, ~40% less work
    (`detector.input_size`).
+   **Zoom:** at 640 px a person at the far end of the yard is a few pixels tall. Each
+   small moving area that nothing confident explains gets a second look: a crop at the
+   substream's full resolution (2x closer on a 1280x720 substream). Small objects being
+   tracked stay zoomed on when the whole-frame pass loses them. Spots where a zoom found
+   nothing (trees, bugs, rain) are left alone for 10 s. Costs one extra inference, only
+   while something small moves. On a test clip with far-away people it found 7 people and
+   a car where the whole-frame pass found 4 people.
 4. **Track objects.** The tracker gives each object an identity across frames, so one
    person walking by is one event. It matches by box overlap first, then by distance in
    the direction of travel. That keeps identities stable even when the model only runs
    once or twice a second. Weak detections (below 0.5) can keep an existing track alive
    but never start one. Car/truck/bus confusions count as the same object, and objects
    that stop moving are marked stationary.
+   - **Motion gate:** a new object must appear where something moved in the last 2 s
+     (or be very confident, 0.85+). A coat on a chair or a bush that looks like a person
+     never starts an event. Tiny movements that are too small to wake the model still
+     count here, so far-away people aren't blocked.
+   - **Label voting:** the model often reports one animal as both "person" and "dog".
+     Overlapping person/animal detections become votes on one object, which takes the
+     majority label.
 5. **Confirm events.** An object becomes an event only once it has been seen for as long
    as `min_frames` frames take at the configured fps, and either its median score
-   reaches `threshold` or one sighting is very confident (`threshold` + 0.2). One
-   confident frame of a shadow isn't enough.
+   reaches `threshold` (or the object's own entry in `thresholds`) or one sighting is very
+   confident (`threshold` + 0.2). One confident frame of a shadow isn't enough.
+   - **Night:** infrared footage is detected per camera (it has no colour at all). There,
+     the score needed rises by `night_boost` (0.1), one more sighting is needed, and the
+     second opinion before alerting must be 0.1 surer too. Events remember they were at
+     night.
+   - **Label mix-ups wait:** if the votes are split (say 55% dog, 45% person), the event
+     waits for more sightings until one label has 60%.
 6. **Save and publish.** Each event keeps its best snapshot: confident, large, not cut off
    by the frame edge. Events go to SQLite and MQTT (`start` / `update` / `end`), plus a
    retained per-label count (`bigbrother/<camera>/person`) for Home Assistant later.
@@ -280,7 +301,7 @@ and notifies:
 
 Click an alert badge to see the exact picture that was sent.
 
-**Arm or disarm** with the button at the top of the viewer, or over MQTT: publish `on` or
+**Arm or disarm** with the lamp at the top of the app, or over MQTT: publish `on` or
 `off` to `bigbrother/alerts/armed/set`. The state is published to `bigbrother/alerts/armed`.
 
 **Set up Pushover:**
@@ -293,10 +314,52 @@ Click an alert badge to see the exact picture that was sent.
 
 The verifier model, YOLOX-m (~100 MB), downloads on first start.
 
+## Health alerts
+
+The alerter also watches the NVR itself and tells you, through the same notifier, when:
+- a camera stops recording (no new recording saved for a few minutes; the recorder's last
+  error is included),
+- detection stops on a camera,
+- the recorder or detector service goes offline, or go2rtc stops answering,
+- the recordings disk gets fuller than retention should allow.
+
+A problem must last 5 minutes (`alerts.health.after_minutes`) before it's reported, so
+restarts don't alert. Each problem is reported once, with a reminder every 12 hours, and
+"back to normal" follows when it's fixed. Health alerts go out even when intrusion alerts
+are switched off. Current problems show under **Settings → System status**, with a red dot
+on Settings.
+
+## Detection feedback and test sets
+
+Detection is tuned on your own cameras, from your verdicts:
+- **On each event** ("Was this right?"): *Correct*, *False alarm*, or *Wrong object* and
+  what it really was. The Events page can filter to events you haven't reviewed, or to
+  false alarms.
+- **Missed something?** On Recordings, go to the moment and press **Report a missed
+  detection**. 10 seconds either side are kept, even after the 24/7 footage is deleted.
+- **Export:** Settings → Detection feedback → **Build export** makes a zip of every reviewed
+  event and reported miss (optionally plus 50 unreviewed events): snapshots, alert pictures
+  and clips shrunk to 960 px at 5 fps, about 0.2 MB per event. No passwords or camera
+  addresses are included.
+
+`evaluate-testset` replays the zip through the same detection code the detector runs,
+with the old settings ("before"), the current ones ("now") and any variants you name, and
+scores each against your verdicts: false alarms removed, correct events kept, wrong objects
+fixed, misses found:
+
+```bash
+docker compose run --rm -v "$PWD:/w" tools evaluate-testset /w/bigbrother-testset-20261126-0900.zip \
+    --variant "strict:threshold=0.7" --variant "nozoom:zoom=false"
+```
+
 ## How recording works
 
 - **Single camera connection.** Each camera is opened once, by go2rtc. Everything else reads
   go2rtc's restream.
+- **Event clips are kept separately.** Once an event's recording is on disk, its clip (5 s
+  before to 5 s after, at most the first 5 minutes) is cut out without re-encoding and kept
+  for `storage.event_retention_days` (default 30), while 24/7 footage follows
+  `retention_days`. Snapshots and alert pictures follow the events.
 - **No re-encoding.** ffmpeg copies video straight into 60-second MP4 segments aligned to the
   clock. H.265 segments get tagged `hvc1` so they play on iPhone. G.711 audio is converted to
   AAC, only if `audio: true`.

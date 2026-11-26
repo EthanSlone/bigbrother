@@ -150,7 +150,7 @@ def test_retention_prunes_old_events_pictures_and_clips(tmp_path):
     from bigbrother.config import parse_config
     from bigbrother.recorder.retention import Retention
 
-    cfg = parse_config({"storage": {"retention_days": 7},
+    cfg = parse_config({"storage": {"retention_days": 7, "event_retention_days": 7},
                         "cameras": {"front": {"streams": {"main": "rtsp://h/1"}}}})
     db = tmp_path / "db.sqlite"
     events, alerts = EventStore(db), AlertStore(db)
@@ -179,3 +179,37 @@ def test_retention_prunes_old_events_pictures_and_clips(tmp_path):
     assert not (tmp_path / "snapshots/old.jpg").exists() and (tmp_path / "snapshots/new.jpg").exists()
     assert not (tmp_path / "alerts/old.jpg").exists() and alerts.get("old") is None
     assert not clip.exists()
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg not installed")
+def test_event_clips_are_kept_after_recordings_go(tmp_path):
+    from bigbrother.config import parse_config
+    from bigbrother.playback import archived_clip_path
+    from bigbrother.recorder.archive import EventArchiver
+    from bigbrother.recorder.retention import Retention
+
+    db = tmp_path / "db.sqlite"
+    index, events, root = RecordingIndex(db), EventStore(db), tmp_path / "rec"
+    t0 = 1_000_000.0
+    make_segments(root, index, "front", t0, 4)                   # 40 s recorded
+    events.save(ev("done", t0 + 10, t0 + 14))
+    events.save(ev("late", t0 + 30, t0 + 38))                     # needs t0+43: not on disk yet
+    events.save(ev("open", t0 + 20, None))                        # still in view
+    arch = EventArchiver(index, root, tmp_path, db, {"front"})
+    assert arch.run_once(now=t0 + 60) == 1
+    kept = archived_clip_path(tmp_path, "front", "done")
+    assert kept.exists() and 12 <= duration(kept) <= 16
+    assert not archived_clip_path(tmp_path, "front", "late").exists()
+    assert arch.run_once(now=t0 + 60 + 1000) == 1                 # gave up waiting: keeps what exists
+    assert archived_clip_path(tmp_path, "front", "late").exists()
+
+    # 24/7 footage expires after 1 day; events are kept 30.
+    cfg = parse_config({"storage": {"retention_days": 1, "event_retention_days": 30},
+                        "cameras": {"front": {"streams": {"main": "rtsp://h/1"}}}})
+    Retention(cfg, root, index, data_dir=tmp_path, db_path=db).run_once(now=t0 + 3 * 86400)
+    assert index.count("front") == 0
+    pb = Playback(index, root, tmp_path, events, {"front": 10})
+    path, meta = pb.event_clip("done")
+    assert path == kept and not meta["partial"]                   # still playable
+    Retention(cfg, root, index, data_dir=tmp_path, db_path=db).run_once(now=t0 + 31 * 86400)
+    assert not kept.exists() and events.get("done") is None

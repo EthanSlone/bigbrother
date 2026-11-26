@@ -20,13 +20,10 @@ from .events import EventManager
 from .frames import FrameSource
 from .model_store import resolve_model
 from .models import InferencePool, load_model, plan_threads
-from .motion import MotionDetector, MotionResult
-from .tracker import Track, Tracker
-from ..zones import ground_point, in_any, update_zones
+from .pipeline import Pipeline
+from .tracker import Track
 
 log = logging.getLogger(__name__)
-
-RECHECK_SECONDS = 30.0  # re-run the model this often even without motion, to confirm parked objects
 
 
 @dataclass
@@ -48,16 +45,13 @@ class CameraWorker(threading.Thread):
         self.source = FrameSource(cam.id, url, decode_fps, s.width)
         self._every = max(1, round(decode_fps / s.fps))
         self._next_seq = 0
-        self.motion = MotionDetector(masks=cam.motion_masks)
-        self.tracker = Tracker()
         self.events = EventManager(cam.id, s, store, data_dir, publish)
+        self.pipeline = Pipeline(cam.id, s, model, self.events, zones=cam.zones,
+                                 motion_masks=cam.motion_masks, object_masks=cam.object_masks)
+        self.tracker = self.pipeline.tracker
         self.model = model
         self.view = ViewState()
         self._stop = threading.Event()
-        self._last_check = 0.0
-        self._infer_ms: deque[float] = deque(maxlen=50)
-        self._wait_ms: deque[float] = deque(maxlen=50)
-        self._detect_ts: deque[float] = deque(maxlen=200)
         self._frame_ts: deque[float] = deque(maxlen=200)    # frames processed
         self.skipped = 0
 
@@ -86,29 +80,7 @@ class CameraWorker(threading.Thread):
         self.events.end_all(time.time())
 
     def _process(self, img: np.ndarray, ts: float) -> None:
-        m: MotionResult = self.motion.update(img)
-        need = (
-            m.detected
-            or m.lighting_change
-            or self.tracker.has_moving()
-            or ts - self._last_check >= RECHECK_SECONDS
-        )
-        if need:
-            s = self.cam.detect
-            dets, infer_ms, wait_ms = self.model.detect_timed(img, s.min_score, set(s.labels))
-            self._infer_ms.append(infer_ms)
-            self._wait_ms.append(wait_ms)
-            h, w = img.shape[:2]
-            if self.cam.object_masks:
-                dets = [d for d in dets if not in_any(ground_point(d.box, w, h), self.cam.object_masks)]
-            self._detect_ts.append(ts)
-            self._last_check = ts
-            ended = self.tracker.update(dets, ts)
-            if self.cam.zones:
-                for t in self.tracker.tracks:
-                    if t.misses == 0:
-                        update_zones(t, self.cam.zones, w, h)
-            self.events.process(self.tracker.tracks, ended, img, ts)
+        m, _ = self.pipeline.process(img, ts)
         self.view = ViewState(ts=ts, tracks=[self._track_view(t) for t in self.tracker.tracks],
                               motion=m.boxes)
 
@@ -130,9 +102,10 @@ class CameraWorker(threading.Thread):
         return {
             "camera": self.cam.id, "name": self.cam.name, "state": self.source.state,
             "error": self.source.error, "size": self.source.size,
-            "fps_in": fps_in, "fps_analysed": rate(self._frame_ts), "detect_fps": rate(self._detect_ts),
-            "infer_ms": round(sum(self._infer_ms) / len(self._infer_ms), 1) if self._infer_ms else None,
-            "wait_ms": round(sum(self._wait_ms) / len(self._wait_ms), 1) if self._wait_ms else None,
+            "fps_in": fps_in, "fps_analysed": rate(self._frame_ts), "detect_fps": rate(self.pipeline.detect_ts),
+            "infer_ms": round(sum(p.infer_ms) / len(p.infer_ms), 1) if (p := self.pipeline).infer_ms else None,
+            "wait_ms": round(sum(p.wait_ms) / len(p.wait_ms), 1) if p.wait_ms else None,
+            "zoom_runs": p.zoom_runs, "model_runs": p.model_runs, "night": p.night.is_night,
             "skipped_frames": self.skipped, "tracks": len(self.tracker.tracks),
             "events_started": self.events.started, "filtered": self.events.filtered,
         }

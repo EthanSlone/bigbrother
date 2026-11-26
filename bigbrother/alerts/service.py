@@ -152,7 +152,7 @@ class Alerter:
             title=f"{ev['label'].capitalize()} · {cam.name}",
             body=f"{ev['label'].capitalize()}{where} at {clock}",
             image_jpeg=image,
-            url=f"{self.cfg.alerts.public_url}/events/{ev['id']}" if self.cfg.alerts.public_url else "",
+            url=f"{self.cfg.alerts.public_url}/#/events/{ev['id']}" if self.cfg.alerts.public_url else "",
             url_title="View clip",
             timestamp=int(ev["start_ts"]),
         )
@@ -204,7 +204,7 @@ def build_verifier(cfg: Config) -> Verifier | None:
     return Verifier(model, cfg.alerts.verify_threshold)
 
 
-def run(cfg: Config, data_dir: Path, db_path: Path) -> None:
+def run(cfg: Config, data_dir: Path, db_path: Path, recordings_root: Path = Path("/recordings")) -> None:
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
@@ -233,6 +233,11 @@ def run(cfg: Config, data_dir: Path, db_path: Path) -> None:
         publish("alerts/armed", "on" if on else "off", True)
         log.info("alerts %s via MQTT", "armed" if on else "disarmed")
 
+    from .health import HealthWatcher
+    health = HealthWatcher(cfg, db_path, recordings_root, notifier, publish,
+                           os.environ.get("BB_DETECTOR_URL", "http://detector:5050"))
+    mqtt.subscribe("recorder/+/state", health.on_recorder_state)
+    mqtt.subscribe("+/available", health.on_available)
     mqtt.subscribe("events", on_event)
     mqtt.subscribe("alerts/armed/set", on_armed)
     restart_on_config_change(mqtt, "alerter", stop, cfg.source_mtime)
@@ -242,6 +247,10 @@ def run(cfg: Config, data_dir: Path, db_path: Path) -> None:
     alerter = Alerter(cfg, store, data_dir, notifier, verifier, publish)
     try:
         while not stop.is_set():
+            try:
+                health.tick()
+            except Exception:  # noqa: BLE001 - health checks must never stop alerting
+                log.exception("health check failed")
             try:
                 msg = inbox.get(timeout=1.0)
             except queue.Empty:

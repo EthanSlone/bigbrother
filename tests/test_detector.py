@@ -345,3 +345,84 @@ def test_real_model_runs_at_16x9_input():
                        input_size=(640, 384))
     assert model.backend.input_shape == (384, 640)
     assert model.detect(np.full((360, 640, 3), 120, np.uint8), 0.35) == []
+
+
+# -- detection quality features ------------------------------------------------------------
+
+def test_lookalike_detections_vote_on_one_object():
+    from bigbrother.detector.models import Detection
+    from bigbrother.detector.pipeline import merge_lookalikes
+    dets = [Detection("person", 0.55, (10, 10, 50, 90)), Detection("dog", 0.62, (12, 12, 50, 88)),
+            Detection("car", 0.9, (200, 50, 300, 120))]
+    out = merge_lookalikes(dets)
+    assert sorted(d.label for d in out) == ["car", "dog"]
+    dog = next(d for d in out if d.label == "dog")
+    assert dog.votes == (("person", 0.55),)
+
+
+def test_track_label_follows_the_majority_and_confirmation_waits():
+    from bigbrother.config import DetectSettings
+    from bigbrother.detector.models import Detection
+    from bigbrother.detector.tracker import Tracker
+    t = Tracker(label_vote=True)
+    box = (100, 100, 140, 180)
+    t.update([Detection("person", 0.6, box)], 0.0)
+    t.update([Detection("dog", 0.7, box)], 0.2)      # same object, other label: one track
+    t.update([Detection("dog", 0.75, box)], 0.4)
+    assert len(t.tracks) == 1 and t.tracks[0].label == "dog"
+    assert 0.6 < t.tracks[0].label_share < 0.8
+    old = Tracker(label_vote=False)
+    old.update([Detection("person", 0.6, box)], 0.0)
+    old.update([Detection("dog", 0.7, box)], 0.2)
+    assert len(old.tracks) == 2                       # before: two objects, one wrongly labelled
+
+
+def test_motion_gate_blocks_static_lookalikes(tmp_path):
+    from bigbrother.config import DetectSettings
+    from bigbrother.detector.events import EventManager
+    from bigbrother.detector.models import Detection
+    from bigbrother.detector.pipeline import Pipeline
+    from bigbrother.events_db import EventStore
+
+    class Fixed:   # a "person" that never moves: a coat on a chair
+        backend = type("B", (), {"input_shape": (384, 640)})()
+        def detect(self, img, min_score, labels=None):
+            return [Detection("person", 0.7, (300, 100, 340, 200))]
+
+    frame = np.full((360, 640, 3), (60, 90, 70), np.uint8)
+    for gate, expect in ((True, 0), (False, 1)):
+        s = DetectSettings(motion_gate=gate, zoom=False)
+        store = EventStore(tmp_path / f"{gate}.db")
+        em = EventManager("c", s, store, tmp_path, lambda *a: None)
+        p = Pipeline("c", s, Fixed(), em)
+        for i in range(40):
+            p._last_check = -1e18          # force the model to run each frame
+            p.process(frame, i * 0.2)
+        assert len(store.recent()) == expect
+
+
+def test_night_detector_needs_a_steady_grey_picture():
+    from bigbrother.detector.pipeline import NightDetector
+    nd = NightDetector(switch_after=3)
+    colour = np.zeros((90, 160, 3), np.uint8); colour[:] = (40, 120, 60)
+    grey = np.full((90, 160, 3), 90, np.uint8)
+    assert not nd.update(colour)
+    assert not nd.update(grey) and not nd.update(grey)
+    assert nd.update(grey)                          # third grey frame in a row
+    assert nd.update(colour)                        # one colour frame doesn't flip it back
+
+
+def test_night_and_per_object_thresholds_raise_the_bar(tmp_path):
+    from bigbrother.config import DetectSettings
+    from bigbrother.detector.events import EventManager
+    from bigbrother.detector.tracker import Track
+    from bigbrother.events_db import EventStore
+    s = DetectSettings(threshold=0.6, thresholds=(("dog", 0.8),), night_boost=0.1, min_frames=3)
+    em = EventManager("c", s, EventStore(tmp_path / "e.db"), tmp_path, lambda *a: None)
+    t = Track(1, "person", (0, 0, 10, 10), 0.0, 1.0, hits=4)
+    t.scores.extend([0.65] * 4)
+    t.label_votes["person"] = 2.6
+    assert em._confirmed(t, night=False)
+    assert not em._confirmed(t, night=True)          # 0.65 < 0.7 at night
+    t.label_votes = {"dog": 2.6}
+    assert not em._confirmed(t)                      # dogs need 0.8 here

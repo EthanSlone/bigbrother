@@ -2,7 +2,7 @@ import {$, $$, api, esc, state, camName, go, parseHash, ICON, labelName, timeOf,
 
 const PAGE = 40;
 let root = null, shell = null, timer = null;
-let filters = {cameras: new Set(), labels: new Set(), alert: '', day: ''};
+let filters = {cameras: new Set(), labels: new Set(), alert: '', day: '', review: ''};
 let items = [], done = false, loading = false;
 
 export async function mount(view, route, sh) {
@@ -13,6 +13,8 @@ export async function mount(view, route, sh) {
       <div><h3>Objects</h3><div class="chips" id="f-label"></div></div>
       <div><h3>Alerts</h3><div class="seg" id="f-alert">
         <button data-v="" aria-pressed="true">All</button><button data-v="notified" aria-pressed="false">Alerted</button></div></div>
+      <div><h3>Your review</h3><div class="seg" id="f-review">
+        <button data-v="" aria-pressed="true">All</button><button data-v="unreviewed" aria-pressed="false">To review</button><button data-v="false_alarm" aria-pressed="false">False alarms</button></div></div>
       <div><h3>Day</h3><input type="date" id="f-day" aria-label="Show events from this day"></div>
       <button class="btn quiet" id="f-clear" hidden>Clear filters</button>
     </aside>
@@ -31,8 +33,10 @@ export async function mount(view, route, sh) {
   for (const b of $$('#f-cam .chip', root)) b.onclick = () => toggle(filters.cameras, b);
   for (const b of $$('#f-label .chip', root)) b.onclick = () => toggle(filters.labels, b);
   for (const b of $$('#f-alert button', root)) b.onclick = () => { filters.alert = b.dataset.v; apply(); };
+  for (const b of $$('#f-review button', root)) b.onclick = () => { filters.review = b.dataset.v; apply(); };
+  shell.tools.innerHTML = '<a class="btn quiet" href="#/settings/feedback">Detection feedback</a>';
   $('#f-day', root).onchange = e => { filters.day = e.target.value; apply(); };
-  $('#f-clear', root).onclick = () => { filters = {cameras: new Set(), labels: new Set(), alert: '', day: ''}; apply(); };
+  $('#f-clear', root).onclick = () => { filters = {cameras: new Set(), labels: new Set(), alert: '', day: '', review: ''}; apply(); };
   $('#more', root).onclick = () => load(false);
   $('#feed', root).addEventListener('click', e => {
     const row = e.target.closest('[data-ev]');
@@ -60,6 +64,7 @@ function readFilters(q) {
   filters.labels = new Set((q.get('label') || '').split(',').filter(Boolean));
   filters.alert = q.get('alert') || '';
   filters.day = q.get('day') || '';
+  filters.review = q.get('review') || '';
 }
 
 function query() {
@@ -68,6 +73,7 @@ function query() {
   if (filters.labels.size) q.set('label', [...filters.labels].join(','));
   if (filters.alert) q.set('alert', filters.alert);
   if (filters.day) q.set('day', filters.day);
+  if (filters.review) q.set('review', filters.review);
   const s = q.toString();
   return s ? '?' + s : '';
 }
@@ -77,6 +83,7 @@ function apiQuery(extra = {}) {
   if (filters.cameras.size) q.set('camera', [...filters.cameras].join(','));
   if (filters.labels.size) q.set('label', [...filters.labels].join(','));
   if (filters.alert) q.set('alert', filters.alert);
+  if (filters.review) q.set('review', filters.review);
   if (filters.day) {
     const [y, m, d] = filters.day.split('-').map(Number);
     const start = new Date(y, m - 1, d).getTime() / 1000;
@@ -91,8 +98,9 @@ function syncControls() {
   for (const b of $$('#f-cam .chip', root)) b.setAttribute('aria-pressed', filters.cameras.has(b.dataset.v));
   for (const b of $$('#f-label .chip', root)) b.setAttribute('aria-pressed', filters.labels.has(b.dataset.v));
   for (const b of $$('#f-alert button', root)) b.setAttribute('aria-pressed', b.dataset.v === filters.alert);
+  for (const b of $$('#f-review button', root)) b.setAttribute('aria-pressed', b.dataset.v === filters.review);
   $('#f-day', root).value = filters.day;
-  $('#f-clear', root).hidden = !(filters.cameras.size || filters.labels.size || filters.alert || filters.day);
+  $('#f-clear', root).hidden = !(filters.cameras.size || filters.labels.size || filters.alert || filters.day || filters.review);
 }
 
 function apply() {
@@ -134,12 +142,19 @@ function alertBadge(a) {
   return `<span class="badge ${cls}">${esc(ALERT_TEXT[a.status] || a.status)}</span>`;
 }
 
+const VERDICT_TEXT = {correct: 'Marked correct', false_alarm: 'False alarm', wrong_label: 'Wrong object'};
+function verdictBadge(f) {
+  if (!f) return '';
+  const extra = f.verdict === 'wrong_label' && f.label ? `: ${labelName(f.label)}` : '';
+  return `<span class="badge ${f.verdict === 'correct' ? 'ok' : 'failed'}">${esc(VERDICT_TEXT[f.verdict])}${esc(extra)}</span>`;
+}
+
 function draw() {
   if (!root) return;
   const feed = $('#feed', root);
   if (!feed) return;
   if (!items.length) {
-    const filtered = filters.cameras.size || filters.labels.size || filters.alert || filters.day;
+    const filtered = filters.cameras.size || filters.labels.size || filters.alert || filters.day || filters.review;
     feed.innerHTML = `<div class="empty"><h2>${filtered ? 'No events match these filters' : 'No events yet'}</h2>
       ${filtered ? 'Try another day, or clear the filters.' : 'When a camera sees a person, vehicle or animal, it shows up here with a snapshot and a clip.'}</div>`;
     $('#more', root).hidden = true;
@@ -156,7 +171,7 @@ function draw() {
         <span class="where">${esc(camName(e.camera))}${zones}</span></span>
       <span class="when"><b>${timeOf(e.start_ts)}</b>
         ${e.end_ts ? `<span>${esc(duration(e.start_ts, e.end_ts))}</span>` : '<span class="badge live">In view now</span>'}
-        ${alertBadge(e.alert)}</span>
+        ${alertBadge(e.alert)}${verdictBadge(e.feedback)}</span>
     </button>`;
   }
   feed.innerHTML = html + '</div>';
@@ -179,6 +194,7 @@ async function openFromRoute(route) {
       <button class="btn quiet" id="x" aria-label="Close">${ICON.close}</button></div>
     <video controls playsinline ${e.has_snapshot ? `poster="/media/snapshot/${esc(e.id)}.jpg?u=${e.updated_ts}"` : ''}></video>
     <p class="note" id="clipnote" hidden></p>
+    <div class="review" id="review"></div>
     <div class="facts">
       <div>When<b>${esc(dayName(e.start_ts))}, ${timeSec(e.start_ts)}</b></div>
       <div>How long<b>${e.end_ts ? esc(duration(e.start_ts, e.end_ts)) : 'Still in view'}</b></div>
@@ -189,6 +205,7 @@ async function openFromRoute(route) {
       ${a && a.verify_score != null ? `<div>Second opinion<b>${Math.round(a.verify_score * 100)}%</b></div>` : ''}
     </div>`;
   $('#x', sheet).onclick = () => sheet.close();
+  drawReview($('#review', sheet), e);
   if (!sheet.open) sheet.showModal();
   const video = $('video', sheet), note = $('#clipnote', sheet), dl = $('#dl', sheet);
   // Keep checking until the clip exists: recordings are saved a minute at a time.
@@ -214,4 +231,28 @@ async function openFromRoute(route) {
     video.play().catch(() => {});
   };
   tryClip();
+}
+
+const WRONG_CHOICES = ['person', 'car', 'truck', 'bus', 'motorcycle', 'bicycle', 'dog', 'cat', 'bird', 'other'];
+function drawReview(el, e) {
+  const f = e.feedback;
+  el.innerHTML = `<span class="q">Was this right?</span>
+    <button class="btn" data-v="correct" aria-pressed="${f && f.verdict === 'correct'}">Correct</button>
+    <button class="btn" data-v="false_alarm" aria-pressed="${f && f.verdict === 'false_alarm'}">False alarm</button>
+    <label class="wrong">Wrong object: it was
+      <select aria-label="What it really was"><option value="">choose…</option>${WRONG_CHOICES.filter(l => l !== e.label).map(l =>
+        `<option value="${l}" ${f && f.verdict === 'wrong_label' && f.label === l ? 'selected' : ''}>${l === 'other' ? 'something else' : esc(labelName(l).toLowerCase())}</option>`).join('')}</select></label>
+    ${f ? '<button class="btn quiet" data-v="">Clear</button>' : ''}`;
+  const send = async (verdict, label) => {
+    try {
+      if (!verdict) await api(`/api/events/${encodeURIComponent(e.id)}/feedback`, {method: 'DELETE'});
+      else await api(`/api/events/${encodeURIComponent(e.id)}/feedback`, {method: 'PUT', body: {verdict, label}});
+      e.feedback = verdict ? {verdict, label} : null;
+      const it = items.find(x => x.id === e.id); if (it) it.feedback = e.feedback;
+      drawReview(el, e); draw();
+      toast(verdict ? 'Thanks. It\'s saved for tuning detection.' : 'Cleared');
+    } catch (ex) { toast(ex.message); }
+  };
+  for (const b of $$('button[data-v]', el)) b.onclick = () => send(b.dataset.v);
+  $('select', el).onchange = ev => { if (ev.target.value) send('wrong_label', ev.target.value); };
 }

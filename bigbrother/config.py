@@ -50,11 +50,20 @@ class DetectSettings:
     enabled: bool = True
     fps: float = 5.0           # frames per second analysed (from the substream)
     live_fps: float = 0.0      # debug-viewer preview rate; 0 = same as fps (live video comes from go2rtc)
-    width: int = 640           # frames wider than this are scaled down before detection
+    width: int = 1280          # frames wider than this are scaled down (the model sees 640 px; zoom uses the rest)
     labels: tuple[str, ...] = DEFAULT_LABELS
     min_score: float = 0.2     # weakest detection kept; below 0.5 it can only extend an existing track
     threshold: float = 0.6     # an object's median score must reach this to become an event
     min_frames: int = 3        # ...over at least this many frames
+    thresholds: tuple[tuple[str, float], ...] = ()  # per-object overrides of threshold, e.g. (("dog", 0.5),)
+    motion_sensitivity: str = "normal"  # very_low | low | normal | high: how much change counts as motion
+    zoom: bool = True          # second look, at full substream resolution, at small moving things
+    motion_gate: bool = True   # new objects must appear where something moved (static look-alikes ignored)
+    night_boost: float = 0.1   # in infrared (black-and-white) footage, confirmation needs this much more score
+    label_vote: bool = True    # look-alike objects (person/dog/cat) vote on one label instead of splitting
+
+    def threshold_for(self, label: str) -> float:
+        return dict(self.thresholds).get(label, self.threshold)
 
 
 @dataclass(frozen=True)
@@ -110,6 +119,8 @@ class AlertSettings:
     priority: int = 0                     # Pushover priority -2..1
     sound: str = ""                       # Pushover sound name ("" = your default)
     threads: int = 0                      # inference threads for the verifier (0 = auto)
+    health_enabled: bool = True           # alert when a camera stops recording, disk fills, ...
+    health_after_minutes: int = 5         # how long a problem must last before it's reported
 
 
 @dataclass(frozen=True)
@@ -143,8 +154,9 @@ class Camera:
 
 @dataclass(frozen=True)
 class StorageSettings:
-    retention_days: int = 30
+    retention_days: int = 30          # 24/7 recordings
     max_usage_percent: float = 90.0
+    event_retention_days: int = 30    # events: their clips, snapshots and alert pictures
 
 
 @dataclass(frozen=True)
@@ -234,13 +246,26 @@ def _number(value: Any, where: str, lo: float, hi: float) -> float:
     return float(value)
 
 
+# motion_sensitivity -> (pixel change that counts, smallest moving area as a fraction of the frame)
+MOTION_SENSITIVITY = {"very_low": (55, 0.003), "low": (40, 0.0016), "normal": (25, 0.0008), "high": (15, 0.0004)}
+
+
+def _thresholds(raw: Any, base: tuple, where: str) -> tuple[tuple[str, float], ...]:
+    if raw is None:
+        return base
+    if not isinstance(raw, dict) or not all(isinstance(k, str) for k in raw):
+        raise ConfigError(f"{where}.thresholds must map object names to scores, e.g. {{dog: 0.5}}")
+    return tuple(sorted((k, _number(v, f"{where}.thresholds.{k}", 0.05, 0.99)) for k, v in raw.items()))
+
+
 def _detect_settings(raw: Any, base: DetectSettings, where: str) -> DetectSettings:
     if raw is None:
         return base
     if not isinstance(raw, dict):
         raise ConfigError(f"{where} must be a mapping")
     unknown = set(raw) - {"enabled", "fps", "live_fps", "width", "labels", "min_score", "threshold",
-                          "min_frames"}
+                          "min_frames", "thresholds", "motion_sensitivity", "zoom", "motion_gate", "night_boost",
+                          "label_vote"}
     if unknown:
         raise ConfigError(f"{where}: unknown key(s) {sorted(unknown)}")
     labels = raw.get("labels", base.labels)
@@ -255,7 +280,15 @@ def _detect_settings(raw: Any, base: DetectSettings, where: str) -> DetectSettin
         min_score=_number(raw.get("min_score", base.min_score), f"{where}.min_score", 0.05, 0.99),
         threshold=_number(raw.get("threshold", base.threshold), f"{where}.threshold", 0.05, 0.99),
         min_frames=_as_int(raw.get("min_frames", base.min_frames), f"{where}.min_frames", 1),
+        thresholds=_thresholds(raw.get("thresholds", None), base.thresholds, where),
+        motion_sensitivity=str(raw.get("motion_sensitivity", base.motion_sensitivity)),
+        zoom=bool(raw.get("zoom", base.zoom)),
+        motion_gate=bool(raw.get("motion_gate", base.motion_gate)),
+        night_boost=_number(raw.get("night_boost", base.night_boost), f"{where}.night_boost", 0, 0.5),
+        label_vote=bool(raw.get("label_vote", base.label_vote)),
     )
+    if settings.motion_sensitivity not in MOTION_SENSITIVITY:
+        raise ConfigError(f"{where}.motion_sensitivity must be one of {', '.join(MOTION_SENSITIVITY)}")
     if settings.threshold < settings.min_score:
         raise ConfigError(f"{where}: threshold must be >= min_score")
     return settings
@@ -394,7 +427,7 @@ def _alert_settings(raw: Any) -> AlertSettings:
     if not isinstance(raw, dict):
         raise ConfigError("alerts must be a mapping")
     unknown = set(raw) - {"enabled", "notifier", "timezone", "verify", "verify_model", "verify_threshold",
-                          "public_url", "pushover", "threads"}
+                          "public_url", "pushover", "threads", "health"}
     if unknown:
         raise ConfigError(f"alerts: unknown key(s) {sorted(unknown)}")
     notifier = str(raw.get("notifier", "pushover"))
@@ -409,6 +442,9 @@ def _alert_settings(raw: Any) -> AlertSettings:
     po = raw.get("pushover") or {}
     if not isinstance(po, dict) or set(po) - {"priority", "sound"}:
         raise ConfigError("alerts.pushover may contain priority and sound")
+    health = raw.get("health") or {}
+    if not isinstance(health, dict) or set(health) - {"enabled", "after_minutes"}:
+        raise ConfigError("alerts.health may contain enabled and after_minutes")
     priority = po.get("priority", 0)
     if priority not in (-2, -1, 0, 1):
         raise ConfigError("alerts.pushover.priority must be -2, -1, 0 or 1 (2/emergency is not supported)")
@@ -423,6 +459,8 @@ def _alert_settings(raw: Any) -> AlertSettings:
         priority=priority,
         sound=str(po.get("sound", "")),
         threads=_as_int(raw.get("threads", 0), "alerts.threads", 0),
+        health_enabled=bool(health.get("enabled", True)),
+        health_after_minutes=int(_number(health.get("after_minutes", 5), "alerts.health.after_minutes", 1, 1440)),
     )
 
 
@@ -443,7 +481,11 @@ def parse_config(data: Any) -> Config:
     storage = StorageSettings(
         retention_days=_as_int(storage_raw.get("retention_days", 30), "storage.retention_days", 1),
         max_usage_percent=float(storage_raw.get("max_usage_percent", 90)),
+        event_retention_days=_as_int(storage_raw.get("event_retention_days", 30), "storage.event_retention_days", 1),
     )
+    unknown = set(storage_raw) - {"retention_days", "max_usage_percent", "event_retention_days"}
+    if unknown:
+        raise ConfigError(f"storage: unknown key(s) {sorted(unknown)}")
     if not 10 <= storage.max_usage_percent <= 99:
         raise ConfigError("storage.max_usage_percent must be between 10 and 99")
 

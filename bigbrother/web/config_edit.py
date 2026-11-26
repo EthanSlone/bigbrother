@@ -32,7 +32,7 @@ BACKUPS_KEPT = 20
 # Keys the app may set; anything else in the file is left as it is.
 CAMERA_KEYS = {"name", "streams", "record", "detect", "zones", "masks", "alert"}
 SETTINGS_KEYS = {"alerts": {"enabled", "notifier", "timezone", "verify", "verify_threshold", "public_url"},
-                 "storage": {"retention_days", "max_usage_percent"}}
+                 "storage": {"retention_days", "max_usage_percent", "event_retention_days"}}
 
 
 def _yaml() -> YAML:

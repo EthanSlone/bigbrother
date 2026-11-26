@@ -12,6 +12,7 @@ from pathlib import Path
 from ..config import Config
 from ..mqtt import Publisher, restart_on_config_change
 from .ffmpeg import CameraRecorder
+from .archive import EventArchiver
 from .index import RecordingIndex
 from .retention import Retention
 from .segments import Organizer
@@ -20,6 +21,7 @@ log = logging.getLogger(__name__)
 
 ORGANIZE_EVERY = 5      # seconds
 RETENTION_EVERY = 600   # seconds
+ARCHIVE_EVERY = 30      # seconds
 
 
 def run(cfg: Config, recordings_root: Path, db_path: Path) -> None:
@@ -55,7 +57,8 @@ def run(cfg: Config, recordings_root: Path, db_path: Path) -> None:
     if not recorders:
         log.warning("no cameras have recording enabled; idling")
 
-    last_retention = 0.0
+    archiver = EventArchiver(index, recordings_root, db_path.parent, db_path, {r.camera.id for r in recorders})
+    last_retention = last_archive = 0.0
     try:
         while not stop.is_set():
             for rec in recorders:
@@ -63,6 +66,12 @@ def run(cfg: Config, recordings_root: Path, db_path: Path) -> None:
                     organizer.process_camera(rec.camera.id)
                 except Exception:  # noqa: BLE001 - keep the loop alive
                     log.exception("[%s] organizer failed", rec.camera.id)
+            if time.monotonic() - last_archive > ARCHIVE_EVERY:
+                try:
+                    archiver.run_once()
+                except Exception:  # noqa: BLE001
+                    log.exception("keeping event clips failed")
+                last_archive = time.monotonic()
             if time.monotonic() - last_retention > RETENTION_EVERY:
                 try:
                     retention.run_once()

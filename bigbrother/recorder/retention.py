@@ -76,23 +76,35 @@ class Retention:
         return removed
 
     def prune_events(self, now: float) -> int:
-        """Events, their snapshots and alert pictures follow storage.retention_days."""
+        """Events, their snapshots, alert pictures and kept clips follow storage.event_retention_days."""
         if self.data_dir is None or self.db_path is None:
             return 0
         from ..alerts_db import AlertStore
         from ..events_db import EventStore
 
         events, alerts = EventStore(self.db_path), AlertStore(self.db_path)
-        cutoff = now - self.cfg.storage.retention_days * 86400
+        cutoff = now - self.cfg.storage.event_retention_days * 86400
         removed = 0
         try:
             while batch := events.delete_older_than(cutoff):
+                from ..playback import archived_clip_path
                 for e in batch:
                     if e.snapshot:
                         (self.data_dir / e.snapshot).unlink(missing_ok=True)
+                    archived_clip_path(self.data_dir, e.camera, e.id).unlink(missing_ok=True)
                 for img in alerts.delete_for_events([e.id for e in batch]):
                     (self.data_dir / img).unlink(missing_ok=True)
                 removed += len(batch)
+            if removed:
+                import sqlite3
+                db = sqlite3.connect(self.db_path, timeout=10)
+                try:
+                    db.execute("DELETE FROM event_feedback WHERE event_id NOT IN (SELECT id FROM events)")
+                    db.commit()
+                except sqlite3.OperationalError:
+                    pass   # no feedback table yet
+                finally:
+                    db.close()
         finally:
             events.close()
             alerts.close()

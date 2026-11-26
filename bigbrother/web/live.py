@@ -30,27 +30,34 @@ async def ws_proxy(request: web.Request) -> web.StreamResponse:
         async with ctx.session.ws_connect(upstream_url, params={"src": src}, max_msg_size=0,
                                           heartbeat=30) as upstream:
             async def down():  # go2rtc -> browser
-                async for msg in upstream:
-                    if msg.type == WSMsgType.BINARY:
-                        await client.send_bytes(msg.data)
-                    elif msg.type == WSMsgType.TEXT:
-                        await client.send_str(msg.data)
-                    else:
-                        break
+                try:
+                    async for msg in upstream:
+                        if msg.type == WSMsgType.BINARY:
+                            await client.send_bytes(msg.data)
+                        elif msg.type == WSMsgType.TEXT:
+                            await client.send_str(msg.data)
+                        else:
+                            break
+                except ConnectionResetError:
+                    pass   # the viewer closed the stream (switched page, locked the phone)
 
             async def up():  # browser -> go2rtc (codec negotiation messages)
-                async for msg in client:
-                    if msg.type == WSMsgType.TEXT:
-                        if '"webrtc' in msg.data:   # WebRTC isn't proxied; MSE/HLS only
-                            continue
-                        await upstream.send_str(msg.data)
-                    elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
-                        break
+                try:
+                    async for msg in client:
+                        if msg.type == WSMsgType.TEXT:
+                            if '"webrtc' in msg.data:   # WebRTC isn't proxied; MSE/HLS only
+                                continue
+                            await upstream.send_str(msg.data)
+                        elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
+                            break
+                except ConnectionResetError:
+                    pass
 
             tasks = [asyncio.create_task(down()), asyncio.create_task(up())]
             _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for t in pending:
                 t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         log.warning("live %s: go2rtc unavailable (%s)", src, exc)
         if not client.closed:

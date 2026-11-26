@@ -266,6 +266,8 @@ export class VideoRTC extends HTMLElement {
                 networkState: this.video.networkState,
                 currentTime: this.video.currentTime
             });
+            if (this.ondiag) this.ondiag('video-error', {code: err ? err.code : 0, message: err ? err.message : '',
+                codecs: this.mseCodecs || '', readyState: this.video.readyState});   // BigBrother patch
             if (this.ws) this.ws.close(); // run reconnect for broken MSE stream
         });
 
@@ -318,7 +320,7 @@ export class VideoRTC extends HTMLElement {
         this.ws = new WebSocket(this.wsURL);
         this.ws.binaryType = 'arraybuffer';
         this.ws.addEventListener('open', () => this.onopen());
-        this.ws.addEventListener('close', () => this.onclose());
+        this.ws.addEventListener('close', ev => this.onclose(ev));   // BigBrother patch: pass the close event on
 
         return true;
     }
@@ -429,6 +431,9 @@ export class VideoRTC extends HTMLElement {
             ms.addEventListener('sourceopen', () => {
                 this.send({type: 'mse', value: this.codecs(MediaSource.isTypeSupported)});
             }, {once: true});
+            // BigBrother patch: iPhone's ManagedMediaSource can ask us to pause or resume appending.
+            ms.addEventListener('endstreaming', () => this.ondiag && this.ondiag('mms-endstreaming', {}));
+            this.mode_used = 'mms';
 
             this.video.disableRemotePlayback = true;
             this.video.srcObject = ms;
@@ -461,7 +466,7 @@ export class VideoRTC extends HTMLElement {
                         sb.appendBuffer(data);
                         bufLen = 0;
                     } catch (e) {
-                        // console.debug(e);
+                        if (this.ondiag) this.ondiag('append-error', {name: e.name, message: e.message});   // BigBrother patch
                     }
                 }
 
@@ -510,7 +515,7 @@ export class VideoRTC extends HTMLElement {
                     try {
                         sb.appendBuffer(data);
                     } catch (e) {
-                        // console.debug(e);
+                        if (this.ondiag) this.ondiag('append-error', {name: e.name, message: e.message});   // BigBrother patch
                     }
                 }
             };

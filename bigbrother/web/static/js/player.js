@@ -33,6 +33,7 @@ class BBLive extends VideoRTC {
       if (this.video.currentTime > 0.5 && now - this.lastStall > 1000) this.cushion = Math.min(4, this.cushion + 0.5);
       this.lastStall = now;
       this.stalls = (this.stalls || 0) + 1;
+      if (this.video.currentTime > 0.5 && now - (this.jumpedAt || 0) > 2000) this.ondiag('stall', {stalls: this.stalls});
       clearTimeout(this.stallTimer);   // only say so if it lasts: brief waits aren't worth a message
       this.stallTimer = setTimeout(() => this.status('Buffering…'), 1500);
     });
@@ -66,9 +67,21 @@ class BBLive extends VideoRTC {
     return r;
   }
 
-  onclose() {
+  onclose(ev) {
+    if (this.wsState !== WebSocket.CLOSED) {   // not a close we asked for (page change, tile scrolled away)
+      this.ondiag('ws-close', {code: ev ? ev.code : 0, reason: ev ? ev.reason : '', clean: ev ? ev.wasClean : null,
+                               after: Math.round((Date.now() - this.connectTS) / 1000), hidden: document.hidden});
+    }
     this.status('Reconnecting…');
     return super.onclose();
+  }
+
+  // Problems go to the server log (docker compose logs web), batched, so they can be diagnosed
+  // without a computer attached to the phone.
+  ondiag(kind, detail) {
+    const v = this.video, end = v && v.buffered.length ? v.buffered.end(v.buffered.length - 1) : 0;
+    report({stream: this.getAttribute('stream'), kind, mode: this.mode_used || (this.mseCodecs ? 'mse' : ''),
+            gap: v ? +(end - v.currentTime).toFixed(2) : null, cushion: this.cushion, rate: v ? v.playbackRate : null, ...detail});
   }
 
   static get observedAttributes() { return ['stream']; }
@@ -78,5 +91,21 @@ class BBLive extends VideoRTC {
     }
   }
 }
+
+const queue = [];
+let flushTimer = 0;
+function report(ev) {
+  queue.push({t: +(Date.now() / 1000).toFixed(1), ...ev});
+  if (queue.length > 60) queue.shift();
+  if (!flushTimer) flushTimer = setTimeout(flush, 5000);
+}
+function flush() {
+  flushTimer = 0;
+  const events = queue.splice(0);
+  if (!events.length) return;
+  fetch('/api/diag/live', {method: 'POST', credentials: 'same-origin', keepalive: true,
+    headers: {'X-BigBrother': '1', 'Content-Type': 'application/json'}, body: JSON.stringify({events})}).catch(() => {});
+}
+addEventListener('pagehide', flush);
 
 if (!customElements.get('bb-live')) customElements.define('bb-live', BBLive);

@@ -2,6 +2,8 @@
 .env
 config/cameras.yml
 config/generated/
+config/backups/
+config/*.yml.tmp
 
 # Media and data
 *.mp4

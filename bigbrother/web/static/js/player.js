@@ -21,8 +21,38 @@ class BBLive extends VideoRTC {
     this.msg.className = 'msg';
     this.appendChild(this.msg);
     this.status('Connecting…');
-    this.video.addEventListener('playing', () => this.status(''));
-    this.video.addEventListener('waiting', () => this.status('Buffering…'));
+    // Live cushion: how far behind the newest received video we play. It starts at 1 s, grows
+    // by half a second each time the stream stalls (up to 4 s) and shrinks back after a calm
+    // minute, so a steady LAN stays near real time and a phone on LTE stops stuttering.
+    this.cushion = 1.0;
+    this.lastStall = performance.now();
+    this.video.addEventListener('playing', () => { clearTimeout(this.stallTimer); this.status(''); });
+    this.video.addEventListener('waiting', () => {
+      const now = performance.now();
+      if (now - (this.jumpedAt || 0) < 2000) return;   // our own jump to live, not the network
+      if (this.video.currentTime > 0.5 && now - this.lastStall > 1000) this.cushion = Math.min(4, this.cushion + 0.5);
+      this.lastStall = now;
+      this.stalls = (this.stalls || 0) + 1;
+      clearTimeout(this.stallTimer);   // only say so if it lasts: brief waits aren't worth a message
+      this.stallTimer = setTimeout(() => this.status('Buffering…'), 1500);
+    });
+  }
+
+  liveSync(gap, end) {
+    const v = this.video, now = performance.now();
+    if (gap > this.cushion + 4) {      // far behind (tab was hidden, network burst): jump to live
+      this.jumpedAt = now;
+      v.currentTime = Math.max(0, end - this.cushion);
+      v.playbackRate = 1;
+      return;
+    }
+    if (now - this.lastStall > 60000 && this.cushion > 0.6) {
+      this.cushion = Math.max(0.6, this.cushion - 0.25);
+      this.lastStall = now - 30000;    // next step down after another 30 s
+    }
+    // Speed up or slow down gently to sit at the cushion: barely noticeable near it, up to 2x
+    // when well behind (some cameras' clocks run fast, so video arrives quicker than real time).
+    v.playbackRate = Math.min(2, Math.max(0.9, 1 + (gap - this.cushion) * 0.5));
   }
 
   status(text) { if (this.msg) this.msg.textContent = text; }

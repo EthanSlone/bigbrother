@@ -247,8 +247,19 @@ def plan_threads(workers: int, threads: int, cpus: int | None = None) -> tuple[i
     """
     cpus = cpus or cpu_count()
     workers = workers or max(1, cpus // 8)
-    threads = threads or max(1, cpus // workers)
+    # Leave cores free on bigger machines: OpenVINO's threads spin while they work, and if the
+    # model takes every core, go2rtc and the app relaying live video stutter.
+    usable = cpus - (2 if cpus >= 12 else 1 if cpus >= 6 else 0)
+    threads = threads or max(1, usable // workers)
     return workers, threads
+
+
+def lower_priority(step: int = 10) -> None:
+    """Run inference behind recording and live video when the CPU is contended (Unix only)."""
+    try:
+        os.nice(step)
+    except (AttributeError, OSError):
+        pass
 
 
 class InferencePool:

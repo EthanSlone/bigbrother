@@ -19,7 +19,7 @@ from ..mqtt import Publisher, restart_on_config_change
 from .events import EventManager
 from .frames import FrameSource
 from .model_store import resolve_model
-from .models import InferencePool, load_model, plan_threads
+from .models import InferencePool, load_model, lower_priority, plan_threads
 from .pipeline import Pipeline
 from .tracker import Track
 
@@ -120,7 +120,8 @@ def run(cfg: Config, data_dir: Path, db_path: Path, viewer_port: int,
     d = cfg.detector
     model_path, builtin_family = resolve_model(d.model)
     workers, threads = plan_threads(d.workers, d.threads)
-    log.info("inference: %d worker(s) x %d thread(s)", workers, threads)
+    lower_priority()   # recording, go2rtc and live video come first when the CPU is busy
+    log.info("inference: %d worker(s) x %d thread(s), lower priority", workers, threads)
     model = InferencePool(load_model(builtin_family or d.family, model_path, d.backend, d.device, threads,
                                      d.input_size), workers)
 

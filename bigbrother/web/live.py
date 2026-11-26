@@ -24,7 +24,9 @@ async def ws_proxy(request: web.Request) -> web.StreamResponse:
     if src not in ctx.streams():
         raise web.HTTPNotFound(text="unknown stream")
     upstream_url = ctx.cfg.go2rtc_api.replace("http", "ws", 1) + "/api/ws"
-    client = web.WebSocketResponse(heartbeat=30, max_msg_size=0)
+    # No permessage-deflate: H.264 doesn't compress, and deflating every chunk on the app's
+    # one thread only adds CPU and delay (aiohttp would otherwise enable it for every browser).
+    client = web.WebSocketResponse(heartbeat=30, max_msg_size=0, compress=False)
     await client.prepare(request)
     try:
         async with ctx.session.ws_connect(upstream_url, params={"src": src}, max_msg_size=0,

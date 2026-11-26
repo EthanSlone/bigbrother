@@ -76,6 +76,13 @@ function detCell(d) {
     ${d.error ? `<div class="muted">${esc(d.error)}</div>` : ''}`;
   return `<span class="dot ok"></span>Watching, ${d.fps_analysed ?? 0} fps`;
 }
+// Load average vs CPUs: past about 85% the server is short of CPU, and live video and recording
+// are the first things to suffer.
+function loadText({avg, cpus}) {
+  const share = avg[0] / cpus, busy = share > 0.85;
+  return `<span class="dot ${busy ? 'warn' : 'ok'}"></span>${Math.round(share * 100)}% of ${cpus} CPUs in use over the last minute
+    (${Math.round(avg[2] / cpus * 100)}% over 15 minutes).${busy ? ' The server is short of CPU: live video may stutter. Detection can be lightened per camera (fewer frames per second, or Strictness).' : ''}`;
+}
 async function renderStatus(panel, _r, setTimer) {
   panel.innerHTML = `<h2>System status</h2><div id="st"><p class="muted">Loading…</p></div>`;
   const draw = async () => {
@@ -105,7 +112,8 @@ async function renderStatus(panel, _r, setTimer) {
       ${d ? `<div style="margin-top:26px"><h3>Storage</h3>
         <p>${GB(d.used)} of ${GB(d.total)} used (${d.percent}%). 24/7 recordings are kept ${d.retention_days} days and events ${d.event_retention_days} days; if the disk passes ${d.limit_percent}%, the oldest recordings are deleted first.</p>
         <div class="meter" style="margin-top:10px" role="img" aria-label="Disk ${d.percent}% full"><i style="width:${d.percent}%"></i><b style="left:${d.limit_percent}%"></b></div></div>` : ''}
-      ${svc ? `<div style="margin-top:26px"><h3>Services</h3><p>${svc}</p></div>` : ''}`;
+      ${svc ? `<div style="margin-top:26px"><h3>Services</h3><p>${svc}</p></div>` : ''}
+      ${s.load ? `<div style="margin-top:26px"><h3>Server load</h3><p>${loadText(s.load)}</p></div>` : ''}`;
   };
   await draw();
   setTimer(setInterval(() => { if (!document.hidden) draw(); }, 5000));

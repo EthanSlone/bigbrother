@@ -471,7 +471,10 @@ export class VideoRTC extends HTMLElement {
                 try { buffered = sb.buffered; } catch (e) { return; }
                 if (!sb.updating && buffered && buffered.length) {
                     const end = sb.buffered.end(sb.buffered.length - 1);
-                    const start = end - 5;
+                    // BigBrother patch: keep 10 s instead of 5 so a larger live cushion fits, and let
+                    // the element choose its playback speed (liveSync) instead of speed = buffered
+                    // seconds, which kept almost no cushion and stalled on any network hiccup.
+                    const start = end - 10;
                     const start0 = sb.buffered.start(0);
                     if (start > start0) {
                         sb.remove(start0, start);
@@ -481,17 +484,25 @@ export class VideoRTC extends HTMLElement {
                         this.video.currentTime = start;
                     }
                     const gap = end - this.video.currentTime;
-                    this.video.playbackRate = gap > 0.1 ? gap : 0.1;
-                    // console.debug('VideoRTC.buffered', gap, this.video.playbackRate, this.video.readyState);
+                    if (this.liveSync) this.liveSync(gap, end);
+                    else this.video.playbackRate = gap > 0.1 ? gap : 0.1;
                 }
             });
 
-            const buf = new Uint8Array(2 * 1024 * 1024);
+            let buf = new Uint8Array(2 * 1024 * 1024);
             let bufLen = 0;
 
             this.ondata = data => {
                 if (sb.updating || bufLen > 0) {
                     const b = new Uint8Array(data);
+                    // BigBrother patch: grow instead of throwing when a high-bitrate stream backs up
+                    // (a fixed 2 MB overflowed and silently dropped video until the next keyframe).
+                    if (bufLen + b.byteLength > buf.length) {
+                        if (bufLen + b.byteLength > 64 * 1024 * 1024) { bufLen = 0; return; }   // hopelessly behind
+                        const bigger = new Uint8Array(Math.max(buf.length * 2, bufLen + b.byteLength));
+                        bigger.set(buf.subarray(0, bufLen));
+                        buf = bigger;
+                    }
                     buf.set(b, bufLen);
                     bufLen += b.byteLength;
                     // console.debug('VideoRTC.buffer', b.byteLength, bufLen);

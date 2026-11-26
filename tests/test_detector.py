@@ -240,9 +240,10 @@ def test_nms_suppresses_overlaps_and_label_filter_applies():
 
 def test_thread_planning_splits_cpus_between_workers():
     from bigbrother.detector.models import plan_threads
-    assert plan_threads(0, 0, cpus=8) == (1, 8)      # laptop: one inference at a time, all cores
-    assert plan_threads(0, 0, cpus=40) == (5, 8)     # server VM
-    assert plan_threads(2, 0, cpus=8) == (2, 4)
+    assert plan_threads(0, 0, cpus=8) == (1, 7)      # laptop: one inference at a time, one core spare
+    assert plan_threads(0, 0, cpus=40) == (5, 7)     # big server: 2 cores left for video
+    assert plan_threads(0, 0, cpus=16) == (2, 7)     # the Proxmox VM
+    assert plan_threads(2, 0, cpus=8) == (2, 3)
     assert plan_threads(0, 3, cpus=4) == (1, 3)
 
 

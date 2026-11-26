@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 import time
 from functools import lru_cache
@@ -94,7 +95,11 @@ async def status(request: web.Request) -> web.Response:
         pass
     services = {k.split("/")[0]: v for k, v in ctx.status.items() if k.endswith("/available")}
     health = ctx.status.get("health") if isinstance(ctx.status.get("health"), dict) else None
-    return web.json_response({"cameras": cams, "disk": disk, "services": services,
+    try:   # containers share the host's kernel, so this is the whole server's load
+        load = {"avg": [round(x, 2) for x in os.getloadavg()], "cpus": os.cpu_count()}
+    except (AttributeError, OSError):
+        load = None
+    return web.json_response({"cameras": cams, "disk": disk, "services": services, "load": load,
                               "problems": health["problems"] if health else None,
                               "armed": await asyncio.to_thread(ctx.alerts.armed), "ts": now})
 

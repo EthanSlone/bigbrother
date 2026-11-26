@@ -224,10 +224,12 @@ def build_verifier(cfg: Config) -> Verifier | None:
     if not cfg.alerts.verify:
         return None
     from ..detector.model_store import resolve_model
-    from ..detector.models import load_model, plan_threads
+    from ..detector.models import load_model, lower_priority, plan_threads
 
     path, family = resolve_model(cfg.alerts.verify_model)
     _, threads = plan_threads(1, cfg.alerts.threads)
+    threads = cfg.alerts.threads or max(1, min(threads, 4))   # one crop now and then: 4 threads is plenty
+    lower_priority(5)
     model = load_model(family or "yolox", path, cfg.detector.backend, cfg.detector.device, threads)
     return Verifier(model, cfg.alerts.verify_threshold)
 

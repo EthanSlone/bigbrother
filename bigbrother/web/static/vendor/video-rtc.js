@@ -458,6 +458,7 @@ export class VideoRTC extends HTMLElement {
             this.mseCodecs = msg.value;
 
             const sb = ms.addSourceBuffer(msg.value);
+            this.sb = sb;   // BigBrother patch: kept for diagnostics and tests
             sb.mode = 'segments'; // segments or sequence
             sb.addEventListener('updateend', () => {
                 if (!sb.updating && bufLen > 0) {

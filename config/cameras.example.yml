@@ -22,6 +22,7 @@ alerts:
   verify_threshold: 0.5
   # public_url: https://nvr.example.com   # adds a "View clip" link that opens the event in the app
   group_seconds: 90        # one alert per visit: same object on another camera within this (0 = off)
+  vehicles_must_move: true # cars etc. alert only after moving about half their length (parked cars never do)
   # arm_schedule:          # turn alerts on at each start and off at each end (the lamp still works between)
   #   - {days: [mon, tue, wed, thu, fri], start: "09:00", end: "17:00"}
   #   - {start: "22:00", end: "07:00"}

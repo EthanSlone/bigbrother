@@ -417,6 +417,7 @@ async function renderAlerts(panel) {
       <div><button class="btn" type="submit">Save schedule</button></div></form>
     <form class="form" id="glob"><h3>For all cameras</h3>
       <label class="check"><input type="checkbox" name="verify" ${al.verify !== false ? 'checked' : ''}> Double-check with a second, larger model before alerting (fewer false alarms)</label>
+      <label class="check"><input type="checkbox" name="must_move" ${al.vehicles_must_move !== false ? 'checked' : ''}> Vehicles only alert once they've moved (no alerts for parked cars)</label>
       <label class="field">Time zone for schedules and alert times<select name="timezone">${tzs.map(t => `<option ${t === tz ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
       <label class="field">One alert per visit<select name="group">${[[0, 'Off: alert for every camera'], [30, 'Same object on another camera within 30 seconds'],
         [90, 'Same object on another camera within 90 seconds'], [180, 'Same object on another camera within 3 minutes']].map(([v, t]) =>
@@ -429,7 +430,7 @@ async function renderAlerts(panel) {
   const g = $('#glob', panel);
   g.onsubmit = async e => {
     e.preventDefault();
-    try { await save('PUT', '/api/config/settings', {alerts: {verify: g.verify.checked, timezone: g.timezone.value,
+    try { await save('PUT', '/api/config/settings', {alerts: {verify: g.verify.checked, vehicles_must_move: g.must_move.checked, timezone: g.timezone.value,
       group_seconds: +g.group.value, public_url: g.public_url.value.trim().replace(/\/+$/, '')}}, 'Alert settings saved'); }
     catch (ex) { formError($('.error', g), ex); }
   };

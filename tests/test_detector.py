@@ -427,3 +427,73 @@ def test_night_and_per_object_thresholds_raise_the_bar(tmp_path):
     assert not em._confirmed(t, night=True)          # 0.65 < 0.7 at night
     t.label_votes = {"dog": 2.6}
     assert not em._confirmed(t)                      # dogs need 0.8 here
+
+
+# -- parked vehicles -------------------------------------------------------
+
+def test_moved_needs_real_travel_not_jitter():
+    tr = Tracker()
+    ts = 0.0
+    for i in range(20):   # a parked car whose box wobbles by a quarter of its size
+        tr.update([det("car", 0.9, 200 + (30 if i % 2 else 0), 200, 120, 60)], ts=ts)
+        ts += 0.2
+    assert not tr.tracks[0].moved
+    for i in range(10):   # pulls out: 15 px a frame, ~1 car length in 2 s
+        tr.update([det("car", 0.9, 200 + i * 15, 200, 120, 60)], ts=ts)
+        ts += 0.2
+    assert tr.tracks[0].moved
+
+
+def _drive(em, tr, boxes, ts=0.0, frame=np.zeros((360, 640, 3), np.uint8)):
+    for b in boxes:
+        ended = tr.update([det("car", 0.9, *b)] if b else [], ts)
+        em.process(tr.tracks, ended, frame, ts)
+        ts += 0.2
+    return ts
+
+
+def test_parked_car_found_again_starts_parked_and_wont_alert(tmp_path):
+    from bigbrother.alerts.rules import evaluate
+    import datetime as dt
+    store, pub = EventStore(tmp_path / "db.sqlite"), Recorder()
+    settings = DetectSettings(min_frames=3, threshold=0.6)
+    em, tr = EventManager("front", settings, store, tmp_path, pub), Tracker(stationary_seconds=4)
+    parked = (300, 200, 120, 60)
+    import time
+    ts = _drive(em, tr, [parked] * 40, time.time() - 600)   # sits still: becomes stationary, spot remembered
+    first = store.recent()[0]
+    assert first.stationary and not first.moved and len(em.parked) == 1
+    ts = _drive(em, tr, [None] * 30, ts)                 # lost (someone in front, night...)
+    # A restart in between: the spot comes back from the database.
+    em2, tr2 = EventManager("front", settings, store, tmp_path, pub), Tracker(stationary_seconds=4)
+    assert len(em2.parked) == 1
+    pub.msgs.clear()
+    ts = _drive(em2, tr2, [(304, 202, 118, 60)] * 5, ts)   # found again, same spot
+    start = next(p["event"] for t, p, _ in pub.msgs if t == "events" and p["type"] == "start")
+    assert start["stationary"] and not start["moved"]
+    cfg = parse_config({"cameras": {"front": {"streams": {"main": "rtsp://h/1"}, "alert": {"labels": ["car"]}}}})
+    d = evaluate(start, cfg.cameras["front"], cfg.alerts, True, None, ts, dt.datetime(2026, 1, 1, 12))
+    assert not d.alert and "stationary" in d.reason
+    # ...and when it drives off, it moves, unparks and may alert; the spot is forgotten.
+    x = 304
+    for _ in range(15):
+        x += 20
+        ts = _drive(em2, tr2, [(x, 202, 118, 60)], ts)
+    last = [p["event"] for t, p, _ in pub.msgs if t == "events"][-1]
+    assert last["moved"] and not last["stationary"] and em2.parked == []
+    assert evaluate(last, cfg.cameras["front"], cfg.alerts, True, None, ts, dt.datetime(2026, 1, 1, 12)).alert
+
+
+def test_new_car_must_move_before_alerting(tmp_path):
+    from bigbrother.alerts.rules import evaluate
+    import datetime as dt
+    cfg = parse_config({"cameras": {"front": {"streams": {"main": "rtsp://h/1"}, "alert": {"labels": ["car", "person"]}}}})
+    cam, now = cfg.cameras["front"], dt.datetime(2026, 1, 1, 12)
+    ev = {"label": "car", "stationary": False, "moved": False, "zones": []}
+    d = evaluate(ev, cam, cfg.alerts, True, None, 0, now)
+    assert not d.alert and not d.final and "moved" in d.reason
+    assert evaluate({**ev, "moved": True}, cam, cfg.alerts, True, None, 0, now).alert
+    assert evaluate({**ev, "label": "person"}, cam, cfg.alerts, True, None, 0, now).alert   # people needn't move
+    off = parse_config({"alerts": {"vehicles_must_move": False},
+                        "cameras": {"front": {"streams": {"main": "rtsp://h/1"}, "alert": {"labels": ["car"]}}}})
+    assert evaluate(ev, off.cameras["front"], off.alerts, True, None, 0, now).alert

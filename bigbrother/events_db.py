@@ -54,6 +54,7 @@ class Event:
     updated_ts: float
     zones: list[str] = field(default_factory=list)
     night: bool = False
+    moved: bool = False      # has travelled (vehicles only alert once they have)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -79,16 +80,18 @@ class EventStore:
             self._db.execute("ALTER TABLE events ADD COLUMN zones TEXT NOT NULL DEFAULT '[]'")
         if "night" not in cols:
             self._db.execute("ALTER TABLE events ADD COLUMN night INTEGER NOT NULL DEFAULT 0")
+        if "moved" not in cols:
+            self._db.execute("ALTER TABLE events ADD COLUMN moved INTEGER NOT NULL DEFAULT 0")
 
     def save(self, e: Event) -> None:
         with self._lock:
             self._db.execute(
                 "INSERT OR REPLACE INTO events (id, camera, label, start_ts, end_ts, top_score, "
-                "median_score, box, frame_w, frame_h, stationary, snapshot, updated_ts, zones, night) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "median_score, box, frame_w, frame_h, stationary, snapshot, updated_ts, zones, night, moved) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (e.id, e.camera, e.label, e.start_ts, e.end_ts, e.top_score, e.median_score,
                  json.dumps(e.box), e.frame_w, e.frame_h, int(e.stationary), e.snapshot, e.updated_ts,
-                 json.dumps(e.zones), int(e.night)),
+                 json.dumps(e.zones), int(e.night), int(e.moved)),
             )
 
     def close_open(self, now: float) -> int:
@@ -125,7 +128,22 @@ class EventStore:
         r["zones"] = json.loads(r.get("zones") or "[]")
         r["stationary"] = bool(r["stationary"])
         r["night"] = bool(r.get("night", 0))
+        r["moved"] = bool(r.get("moved", 0))
         return Event(**r)
+
+    def parked_spots(self, camera: str, since_ts: float) -> list[tuple[list[float], float]]:
+        """Where vehicles sat parked recently on this camera: (box normalized 0-1, last seen)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT box, frame_w, frame_h, updated_ts FROM events WHERE camera = ? AND stationary = 1 "
+                "AND label IN ('car', 'truck', 'bus', 'motorcycle') AND updated_ts >= ? "
+                "ORDER BY updated_ts DESC LIMIT 200", (camera, since_ts)).fetchall()
+        out = []
+        for box, w, h, ts in rows:
+            b = json.loads(box)
+            if w and h:
+                out.append(([b[0] / w, b[1] / h, b[2] / w, b[3] / h], ts))
+        return out
 
     def delete_older_than(self, cutoff_ts: float, limit: int = 1000) -> list[Event]:
         """Remove ended events that started before cutoff; returns them (to delete their files)."""

@@ -19,6 +19,7 @@ just because we stopped looking.
 from __future__ import annotations
 
 import itertools
+import math
 import statistics
 from collections import deque
 from dataclasses import dataclass, field
@@ -34,6 +35,10 @@ LABEL_GROUPS = {"car": "vehicle", "truck": "vehicle", "bus": "vehicle",
 # frames). With label voting, a strongly overlapping detection of the other kind updates the same
 # object and adds a vote, instead of starting a second, wrongly-labelled object.
 LOOKALIKE_GROUPS = {"person", "animal"}
+# A vehicle has only "moved" (and can alert) once it has gone this many times its own size from
+# where it was first seen. Half a car length: pulling in or out passes it within seconds; a parked
+# car whose box jitters, or that's half hidden by someone walking past, doesn't.
+MOVE_ALERT = 0.5
 CROSS_MATCH_IOU = 0.5
 
 Box = tuple[float, float, float, float]
@@ -73,6 +78,8 @@ class Track:
     history: deque = field(default_factory=lambda: deque(maxlen=200))  # (ts, center)
     stationary: bool = False
     anchor: tuple[float, float] | None = None  # where it settled when it became stationary
+    moved: bool = False          # travelled at least MOVE_ALERT x its size since first seen
+    parked_spot: tuple | None = None   # remembered parking spot it was found in (normalized box)
     last_det_score: float = 0.0
     zones: set = field(default_factory=set)             # zones it is in right now
     zones_visited: list = field(default_factory=list)   # every zone it has entered, in order
@@ -233,7 +240,19 @@ class Tracker:
         t.history.append((ts, center(d.box)))
         self._update_stationary(t, ts)
 
+    def _update_moved(self, t: Track) -> None:
+        """Sticky: has it gone somewhere? Compares where it was first seen with where it is now,
+        each the median of 3 sightings so a jittery or half-hidden box doesn't count as travel."""
+        if t.moved or len(t.history) < 4:
+            return
+        pts = list(t.history)
+        sx, sy = statistics.median(c[0] for _, c in pts[:3]), statistics.median(c[1] for _, c in pts[:3])
+        nx, ny = statistics.median(c[0] for _, c in pts[-3:]), statistics.median(c[1] for _, c in pts[-3:])
+        if math.hypot(nx - sx, ny - sy) >= MOVE_ALERT * t.size():
+            t.moved = True
+
     def _update_stationary(self, t: Track, ts: float) -> None:
+        self._update_moved(t)
         cx, cy = center(t.box)
         limit = self.stationary_move * t.size()
         if t.stationary:

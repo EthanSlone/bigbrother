@@ -26,6 +26,8 @@ class BBLive extends VideoRTC {
     // minute, so a steady LAN stays near real time and a phone on LTE stops stuttering.
     this.cushion = 1.0;
     this.lastStall = performance.now();
+    this.agg = {stalls: 0, holes: 0, maxHole: 0, unstuck: 0, since: performance.now()};
+    this.lastCT = -1; this.lastAdvance = performance.now();
     this.video.addEventListener('playing', () => { clearTimeout(this.stallTimer); this.status(''); });
     this.video.addEventListener('waiting', () => {
       const now = performance.now();
@@ -33,14 +35,49 @@ class BBLive extends VideoRTC {
       if (this.video.currentTime > 0.5 && now - this.lastStall > 1000) this.cushion = Math.min(4, this.cushion + 0.5);
       this.lastStall = now;
       this.stalls = (this.stalls || 0) + 1;
-      if (this.video.currentTime > 0.5 && now - (this.jumpedAt || 0) > 2000) this.ondiag('stall', {stalls: this.stalls});
+      if (this.video.currentTime > 0.5 && now - (this.jumpedAt || 0) > 2000) this.agg.stalls++;
       clearTimeout(this.stallTimer);   // only say so if it lasts: brief waits aren't worth a message
       this.stallTimer = setTimeout(() => this.status('Buffering…'), 1500);
     });
   }
 
+  // Stuck with video ahead: usually a tiny hole in the timeline between chunks (cameras whose
+  // frame timing is off, e.g. sending 10 fps while declaring 20), which browsers won't play
+  // across on their own. Jump to the next buffered video; if the decoder is stuck mid-buffer,
+  // restart it near the live edge.
+  unstick(end) {
+    const v = this.video, now = performance.now(), t = v.currentTime, b = v.buffered;
+    if (v.paused || end - t < 0.3) return false;
+    if (Math.abs(t - this.lastCT) > 0.01) { this.lastCT = t; this.lastAdvance = now; return false; }
+    const stuck = now - this.lastAdvance;
+    if (stuck < 400) return false;
+    for (let i = 0; i < b.length; i++) {
+      const nextStart = t < b.start(i) ? b.start(i) : (t <= b.end(i) && b.end(i) - t < 0.3 && i + 1 < b.length ? b.start(i + 1) : null);
+      if (nextStart !== null) {
+        this.agg.holes++; this.agg.maxHole = Math.max(this.agg.maxHole, +(nextStart - t).toFixed(3));
+        this.jumpedAt = now; this.lastAdvance = now;
+        v.currentTime = nextStart + 0.05;
+        return true;
+      }
+    }
+    if (stuck > 1500) {
+      this.agg.unstuck++;
+      this.jumpedAt = now; this.lastAdvance = now;
+      v.currentTime = Math.max(0, end - this.cushion);
+      return true;
+    }
+    return false;
+  }
+
   liveSync(gap, end) {
     const v = this.video, now = performance.now();
+    if (now - this.agg.since > 10000) {   // one summary per camera every 10 s, only when something happened
+      const a = this.agg;
+      if (a.stalls || a.holes || a.unstuck) this.ondiag('summary', {stalls: a.stalls, holes_skipped: a.holes, biggest_hole: a.maxHole,
+        unstuck: a.unstuck, ranges: v.buffered.length});
+      this.agg = {stalls: 0, holes: 0, maxHole: 0, unstuck: 0, since: now};
+    }
+    if (this.unstick(end)) return;
     if (gap > this.cushion + 4) {      // far behind (tab was hidden, network burst): jump to live
       this.jumpedAt = now;
       v.currentTime = Math.max(0, end - this.cushion);
@@ -79,6 +116,9 @@ class BBLive extends VideoRTC {
   // Problems go to the server log (docker compose logs web), batched, so they can be diagnosed
   // without a computer attached to the phone.
   ondiag(kind, detail) {
+    // Tearing the tile down (page change, scrolled away) empties the video's source, which the
+    // browser reports as an error. That's not a problem worth logging.
+    if (kind === 'video-error' && (this.wsState === WebSocket.CLOSED || /Empty src/.test(detail.message || ''))) return;
     const v = this.video, end = v && v.buffered.length ? v.buffered.end(v.buffered.length - 1) : 0;
     report({stream: this.getAttribute('stream'), kind, mode: this.mode_used || (this.mseCodecs ? 'mse' : ''),
             gap: v ? +(end - v.currentTime).toFixed(2) : null, cushion: this.cushion, rate: v ? v.playbackRate : null, ...detail});

@@ -297,6 +297,10 @@ and notifies:
    - **Schedule:** is it inside the alert schedule?
    - **Moving:** is it moving? Parked cars never alert.
    - **Zone:** has it entered a required zone (`zones`)?
+   - **Parked vehicles:** a car, truck, bus or motorcycle alerts only once it has moved about
+     half its own length (`alerts.vehicles_must_move`). The detector also remembers where
+     vehicles were parked (for 36 hours, across restarts), so a parked car found again after
+     someone walks in front of it, or at night, starts out as parked rather than as a new car.
    - **Cooldown:** has no alert for the same camera and object type gone out within
      `cooldown_seconds`?
 

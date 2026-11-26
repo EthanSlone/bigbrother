@@ -23,7 +23,7 @@ import numpy as np
 
 from ..config import DetectSettings
 from ..events_db import Event, EventStore
-from .tracker import Track
+from .tracker import Track, center, iou
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +31,8 @@ Publish = Callable[[str, dict, bool], None]  # (topic, payload, retain)
 
 SNAPSHOT_INTERVAL = 2.0  # seconds between snapshot rewrites while an event improves
 SAVE_INTERVAL = 5.0      # seconds between database updates for an ongoing event
+PARKED_MEMORY = 36 * 3600  # forget a parking spot nobody has parked in for this long
+PARKED_IOU = 0.5           # how much a vehicle's box must overlap a remembered spot
 
 
 @dataclass
@@ -40,6 +42,8 @@ class _State:
     last_snapshot: float = 0.0
     last_save: float = 0.0
     pending_snapshot: tuple[np.ndarray, tuple] | None = None
+    parking_checked: bool = False
+    parked_saved: float | None = None
 
 
 def snapshot_quality(track: Track, frame_w: int, frame_h: int) -> float:
@@ -67,6 +71,14 @@ class EventManager:
         self._counts: dict[str, int] = {}
         self.filtered = 0  # tracks that never became events
         self.started = 0
+        # Remembered parking spots (normalized boxes): a vehicle found again in one starts out
+        # parked, instead of looking like a new arrival because its track was lost for a while
+        # (someone walked in front, infrared at night, a restart). Seeded from recent events.
+        try:
+            self.parked: list[list] = [[b, t] for b, t in store.parked_spots(camera, time.time() - PARKED_MEMORY)]
+        except Exception:  # noqa: BLE001 - an old or test store without it
+            self.parked = []
+        self._dedupe_parked()
 
     # -- main entry ------------------------------------------------------
     def process(self, tracks: list[Track], ended: list[Track], frame: np.ndarray, ts: float,
@@ -74,6 +86,8 @@ class EventManager:
         h, w = frame.shape[:2]
         for t in tracks:
             st = self._states.setdefault(t.id, _State())
+            if t.group == "vehicle":
+                self._parking(t, st, w, h, ts)
             if st.event is None:
                 if self._confirmed(t, night):
                     self._start(t, st, frame, w, h, ts)
@@ -117,6 +131,37 @@ class EventManager:
         return t.median_score >= threshold or (
             t.top_score >= min(0.95, threshold + 0.2) and t.hits >= min_frames)
 
+    # -- parked vehicles -------------------------------------------------
+    def _parking(self, t: Track, st: "_State", w: int, h: int, ts: float) -> None:
+        nb = [t.box[0] / w, t.box[1] / h, t.box[2] / w, t.box[3] / h]
+        if not st.parking_checked:          # first sighting: is it in a known parking spot?
+            st.parking_checked = True
+            spot = next((p for p in self.parked if iou(p[0], nb) >= PARKED_IOU), None)
+            if spot is not None and not t.moved:
+                t.stationary, t.anchor, t.parked_spot = True, center(t.box), tuple(spot[0])
+                spot[1] = ts
+                log.debug("[%s] track %d starts parked (known spot)", self.camera, t.id)
+            return
+        if t.parked_spot is not None and (t.moved or not t.stationary):   # it drove off
+            self.parked = [p for p in self.parked if iou(p[0], list(t.parked_spot)) < PARKED_IOU]
+            t.parked_spot = None
+            return
+        if t.stationary and (st.parked_saved is None or ts - st.parked_saved >= 60):   # remember / refresh the spot
+            st.parked_saved = ts
+            spot = next((p for p in self.parked if iou(p[0], nb) >= PARKED_IOU), None)
+            if spot is not None:
+                spot[0], spot[1] = nb, ts
+            else:
+                self.parked.append([nb, ts])
+            self.parked = [p for p in self.parked if ts - p[1] < PARKED_MEMORY][-100:]
+
+    def _dedupe_parked(self) -> None:
+        kept: list[list] = []
+        for p in self.parked:                       # newest first
+            if all(iou(p[0], k[0]) < PARKED_IOU for k in kept):
+                kept.append(p)
+        self.parked = kept
+
     # -- lifecycle -------------------------------------------------------
     def _start(self, t: Track, st: _State, frame: np.ndarray, w: int, h: int, ts: float) -> None:
         eid = f"{int(ts)}-{self.camera}-{secrets.token_hex(2)}"
@@ -124,7 +169,7 @@ class EventManager:
             id=eid, camera=self.camera, label=t.label, start_ts=t.first_ts, end_ts=None,
             top_score=t.top_score, median_score=t.median_score, box=list(t.box),
             frame_w=w, frame_h=h, stationary=t.stationary, snapshot=None, updated_ts=ts,
-            zones=list(t.zones_visited),
+            zones=list(t.zones_visited), moved=t.moved,
         )
         st.best_quality = snapshot_quality(t, w, h)
         self._write_snapshot(st, frame, ts)
@@ -138,8 +183,9 @@ class EventManager:
     def _ongoing(self, t: Track, st: _State, frame: np.ndarray, w: int, h: int, ts: float) -> None:
         e = st.event
         assert e is not None
-        changed = t.label != e.label or t.stationary != e.stationary or t.zones_visited != e.zones
-        e.label, e.stationary = t.label, t.stationary
+        changed = (t.label != e.label or t.stationary != e.stationary or t.zones_visited != e.zones
+                   or t.moved != e.moved)
+        e.label, e.stationary, e.moved = t.label, t.stationary, t.moved
         e.zones = list(t.zones_visited)
         e.top_score, e.median_score = t.top_score, t.median_score
         e.updated_ts = ts

@@ -13,6 +13,9 @@ from dataclasses import dataclass
 from ..config import AlertSettings, Camera
 
 
+VEHICLES = {"car", "truck", "bus", "motorcycle"}
+
+
 @dataclass(frozen=True)
 class Decision:
     alert: bool
@@ -36,6 +39,10 @@ def evaluate(event: dict, cam: Camera, settings: AlertSettings, armed: bool,
         return Decision(False, "outside the alert schedule")
     if event.get("stationary"):
         return Decision(False, "stationary (e.g. a parked car)")
+    # A vehicle has to actually go somewhere before it alerts: a parked car that the detector
+    # loses and finds again (someone walks past, night, a restart) is otherwise a "new" car.
+    if settings.vehicles_must_move and label in VEHICLES and not event.get("moved", True):
+        return Decision(False, "hasn't moved (looks parked)")
     if a.zones and not set(event.get("zones") or []) & set(a.zones):
         return Decision(False, f"hasn't entered {' / '.join(a.zones)}")
     if last_alert_ts is not None and now_ts - last_alert_ts < a.cooldown_seconds:
